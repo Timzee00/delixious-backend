@@ -29,6 +29,7 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.set("trust proxy", 1);
 
 // ---------- Security & parsing ----------
 // CSP disabled: this is a JSON API (no HTML rendering), and it would
