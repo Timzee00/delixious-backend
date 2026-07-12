@@ -9,7 +9,7 @@ function baseCookieOptions() {
     // secure requires HTTPS - only enforce in production so local http://
     // development still works without extra setup.
     secure: isProduction,
-    sameSite: 'lax',
+    sameSite: 'none',
   };
 }
 
@@ -38,7 +38,7 @@ export function setAuthCookies(res, session) {
   res.cookie('csrf_token', csrfToken, {
     httpOnly: false,
     secure: isProduction,
-    sameSite: 'lax',
+    sameSite: 'none',
     path: '/',
     maxAge: THIRTY_DAYS_MS,
   });
