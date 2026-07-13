@@ -6,19 +6,11 @@ const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 function baseCookieOptions() {
   return {
     httpOnly: true,
-    // secure requires HTTPS - only enforce in production so local http://
-    // development still works without extra setup.
     secure: isProduction,
     sameSite: 'none',
   };
 }
 
-/**
- * Sets the three auth cookies after a successful login/signup/refresh:
- * - access_token: httpOnly, sent on every request, short-lived (matches Supabase's expires_in)
- * - refresh_token: httpOnly, scoped to /api/auth only (reduces exposure), long-lived
- * - csrf_token: NOT httpOnly (frontend JS must read it to echo it back), see middleware/csrf.js
- */
 export function setAuthCookies(res, session) {
   const accessMaxAge = session.expires_in ? session.expires_in * 1000 : 60 * 60 * 1000;
 
@@ -42,6 +34,8 @@ export function setAuthCookies(res, session) {
     path: '/',
     maxAge: THIRTY_DAYS_MS,
   });
+
+  return csrfToken;
 }
 
 export function clearAuthCookies(res) {
