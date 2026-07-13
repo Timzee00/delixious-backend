@@ -2,17 +2,10 @@ import { supabaseAdmin, supabaseAnon } from '../config/supabase.js';
 import { setAuthCookies, clearAuthCookies } from '../utils/authCookies.js';
 import logger from '../utils/logger.js';
 
-// NOTE: request body validation (email format, password length, allowed
-// roles, etc) now happens in middleware/validate.js + schemas/auth.schema.js
-// before these handlers run - req.body is already known-good here.
-
 export async function signup(req, res, next) {
   try {
     const { email, password, full_name, phone, role } = req.body;
 
-    // signUp via the anon client so Supabase's own auth rules/email
-    // confirmation settings apply. The DB trigger (handle_new_user)
-    // auto-creates the matching profiles row.
     const { data, error } = await supabaseAnon.auth.signUp({
       email,
       password,
@@ -23,8 +16,9 @@ export async function signup(req, res, next) {
       return res.status(400).json({ error: error.message });
     }
 
+    let csrfToken;
     if (data.session) {
-      setAuthCookies(res, data.session);
+      csrfToken = setAuthCookies(res, data.session);
     }
 
     res.status(201).json({
@@ -32,6 +26,7 @@ export async function signup(req, res, next) {
         ? 'Account created successfully.'
         : 'Account created. Please check your email to confirm your account.',
       user: data.session ? { id: data.user.id, email: data.user.email } : undefined,
+      csrfToken,
     });
   } catch (err) {
     next(err);
@@ -45,18 +40,18 @@ export async function login(req, res, next) {
     const { data, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
 
     if (error) {
-      // Deliberately generic - never reveal whether the email exists.
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
     const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', data.user.id).single();
 
-    setAuthCookies(res, data.session);
+    const csrfToken = setAuthCookies(res, data.session);
 
     res.json({
       message: 'Logged in successfully.',
       user: { id: data.user.id, email: data.user.email },
       profile,
+      csrfToken,
     });
   } catch (err) {
     next(err);
@@ -82,9 +77,14 @@ export async function refresh(req, res, next) {
 
     const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', data.user.id).single();
 
-    setAuthCookies(res, data.session);
+    const csrfToken = setAuthCookies(res, data.session);
 
-    res.json({ message: 'Session refreshed.', user: { id: data.user.id, email: data.user.email }, profile });
+    res.json({
+      message: 'Session refreshed.',
+      user: { id: data.user.id, email: data.user.email },
+      profile,
+      csrfToken,
+    });
   } catch (err) {
     next(err);
   }
@@ -96,7 +96,6 @@ export async function logout(req, res, next) {
 
     if (token) {
       await supabaseAdmin.auth.admin.signOut(token).catch((err) => {
-        // Non-fatal - we clear cookies regardless. Just log for visibility.
         logger.warn('Supabase signOut call failed during logout', { error: err.message });
       });
     }
@@ -109,7 +108,11 @@ export async function logout(req, res, next) {
 }
 
 export async function getMe(req, res) {
-  res.json({ user: { id: req.user.id, email: req.user.email }, profile: req.profile });
+  res.json({
+    user: { id: req.user.id, email: req.user.email },
+    profile: req.profile,
+    csrfToken: req.cookies?.csrf_token,
+  });
 }
 
 export async function updateProfile(req, res, next) {
