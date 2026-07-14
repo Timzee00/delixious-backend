@@ -133,3 +133,15 @@ create policy "coupons_public_read_active" on public.coupons
 -- Done. This only adds new columns/tables - nothing existing
 -- was dropped or renamed, so current features keep working.
 -- ============================================================
+alter table public.profiles add column if not exists is_suspended boolean not null default false;
+
+create or replace view public.admin_stats as
+select
+  (select count(*) from public.restaurants) as total_restaurants,
+  (select count(*) from public.restaurants where approval_status = 'pending') as pending_restaurants,
+  (select count(*) from public.profiles where role = 'delivery_agent') as total_riders,
+  (select count(*) from public.profiles where role = 'delivery_agent' and rider_approval_status = 'pending') as pending_riders,
+  (select count(*) from public.profiles where role = 'customer') as total_customers,
+  (select count(*) from public.orders) as total_orders,
+  (select coalesce(sum(total_amount), 0) from public.orders where status <> 'cancelled') as total_revenue,
+  (select coalesce(sum(platform_commission), 0) from public.orders where status <> 'cancelled') as total_commission;
