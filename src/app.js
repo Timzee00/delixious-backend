@@ -91,6 +91,7 @@ app.use('/api/payments', paymentsRoutes);
 app.use('/api/delivery', deliveryRoutes);
 app.use('/api/reviews', reviewsRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/admin', adminRoutes);
 
 // ---------- 404 + error handling ----------
 app.use(notFoundHandler);
