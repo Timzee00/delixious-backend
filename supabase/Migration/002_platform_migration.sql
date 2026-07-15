@@ -145,3 +145,8 @@ select
   (select count(*) from public.orders) as total_orders,
   (select coalesce(sum(total_amount), 0) from public.orders where status <> 'cancelled') as total_revenue,
   (select coalesce(sum(platform_commission), 0) from public.orders where status <> 'cancelled') as total_commission;
+alter table public.payments alter column order_id drop not null;
+alter table public.payments add column if not exists checkout_group_id uuid;
+alter table public.orders add column if not exists checkout_group_id uuid;
+create index if not exists idx_orders_checkout_group on public.orders(checkout_group_id);
+create index if not exists idx_payments_checkout_group on public.payments(checkout_group_id);
