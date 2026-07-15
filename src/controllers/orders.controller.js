@@ -1,9 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { supabaseAdmin } from '../config/supabase.js';
-import { getUserActiveCart } from '../utils/cart.js';
 import { initializeTransaction } from '../utils/paystack.js';
 
-const DELIVERY_FEE = 500; // flat fee in Naira for now; can become distance-based later
+const DELIVERY_FEE = 500; // flat fee per restaurant, in Naira
+const COMMISSION_RATE = 0.10;
 
 const VALID_TRANSITIONS = {
   pending: ['confirmed', 'cancelled'],
@@ -18,77 +18,108 @@ export async function checkout(req, res, next) {
   try {
     const { delivery_address, delivery_lat, delivery_lng } = req.body;
 
-    const activeCart = await getUserActiveCart(req.user.id);
-    if (!activeCart) return res.status(400).json({ error: 'Your cart is empty.' });
+    // A user can have one cart per restaurant simultaneously - fetch all of them.
+    const { data: carts, error: cartsError } = await supabaseAdmin
+      .from('carts')
+      .select('id, restaurant_id')
+      .eq('user_id', req.user.id);
 
-    const { data: cartItems, error: cartItemsError } = await supabaseAdmin
-      .from('cart_items')
-      .select('quantity, special_instructions, menu_items(id, name, price, is_available, restaurant_id)')
-      .eq('cart_id', activeCart.id);
+    if (cartsError) throw cartsError;
+    if (!carts?.length) return res.status(400).json({ error: 'Your cart is empty.' });
 
-    if (cartItemsError) throw cartItemsError;
-    if (!cartItems?.length) return res.status(400).json({ error: 'Your cart is empty.' });
+    const checkoutGroupId = uuidv4();
+    const createdOrders = [];
+    const splitSubaccounts = [];
+    let grandTotalKobo = 0;
 
-    const unavailable = cartItems.find((ci) => !ci.menu_items.is_available);
-    if (unavailable) {
-      return res.status(400).json({
-        error: `${unavailable.menu_items.name} is no longer available. Please update your cart.`,
-      });
+    for (const cart of carts) {
+      const { data: cartItems, error: cartItemsError } = await supabaseAdmin
+        .from('cart_items')
+        .select('quantity, special_instructions, menu_items(id, name, price, is_available, restaurant_id)')
+        .eq('cart_id', cart.id);
+
+      if (cartItemsError) throw cartItemsError;
+      if (!cartItems?.length) continue;
+
+      const unavailable = cartItems.find((ci) => !ci.menu_items.is_available);
+      if (unavailable) {
+        return res.status(400).json({
+          error: `${unavailable.menu_items.name} is no longer available. Please update your cart.`,
+        });
+      }
+
+      const { data: restaurant, error: restaurantError } = await supabaseAdmin
+        .from('restaurants')
+        .select('id, name, is_open, approval_status, paystack_subaccount_code')
+        .eq('id', cart.restaurant_id)
+        .single();
+
+      if (restaurantError || !restaurant) return res.status(404).json({ error: 'Restaurant not found.' });
+      if (!restaurant.is_open) return res.status(400).json({ error: `${restaurant.name} is currently closed.` });
+      if (restaurant.approval_status !== 'approved' || !restaurant.paystack_subaccount_code) {
+        return res.status(400).json({
+          error: `${restaurant.name} is not yet approved to receive orders. Please remove it from your cart.`,
+        });
+      }
+
+      const subtotal = cartItems.reduce((sum, ci) => sum + Number(ci.menu_items.price) * ci.quantity, 0);
+      const total_amount = subtotal + DELIVERY_FEE;
+      const platform_commission = Math.round(subtotal * COMMISSION_RATE * 100) / 100;
+      const restaurantShareKobo = Math.round((subtotal - platform_commission) * 100);
+
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from('orders')
+        .insert({
+          user_id: req.user.id,
+          restaurant_id: restaurant.id,
+          status: 'pending',
+          subtotal,
+          delivery_fee: DELIVERY_FEE,
+          total_amount,
+          platform_commission,
+          rider_payout_amount: Math.round(DELIVERY_FEE * 0.9 * 100) / 100,
+          delivery_address,
+          delivery_lat,
+          delivery_lng,
+          payment_status: 'pending',
+          checkout_group_id: checkoutGroupId,
+        })
+        .select()
+        .single();
+
+      if (orderError) throw orderError;
+
+      const orderItemsPayload = cartItems.map((ci) => ({
+        order_id: order.id,
+        menu_item_id: ci.menu_items.id,
+        name_snapshot: ci.menu_items.name,
+        price_snapshot: ci.menu_items.price,
+        quantity: ci.quantity,
+        subtotal: Number(ci.menu_items.price) * ci.quantity,
+      }));
+
+      const { error: orderItemsError } = await supabaseAdmin.from('order_items').insert(orderItemsPayload);
+      if (orderItemsError) throw orderItemsError;
+
+      await supabaseAdmin.from('delivery_tracking').insert({ order_id: order.id, status: 'pending' });
+
+      createdOrders.push(order);
+      splitSubaccounts.push({ subaccount: restaurant.paystack_subaccount_code, shareKobo: restaurantShareKobo });
+      grandTotalKobo += Math.round(total_amount * 100);
+
+      await supabaseAdmin.from('carts').delete().eq('id', cart.id);
     }
 
-    const { data: restaurant, error: restaurantError } = await supabaseAdmin
-      .from('restaurants')
-      .select('id, name, is_open')
-      .eq('id', activeCart.restaurant_id)
-      .single();
-
-    if (restaurantError || !restaurant) return res.status(404).json({ error: 'Restaurant not found.' });
-    if (!restaurant.is_open) return res.status(400).json({ error: `${restaurant.name} is currently closed.` });
-
-    const subtotal = cartItems.reduce((sum, ci) => sum + Number(ci.menu_items.price) * ci.quantity, 0);
-    const total_amount = subtotal + DELIVERY_FEE;
-
-    const { data: order, error: orderError } = await supabaseAdmin
-      .from('orders')
-      .insert({
-        user_id: req.user.id,
-        restaurant_id: restaurant.id,
-        status: 'pending',
-        subtotal,
-        delivery_fee: DELIVERY_FEE,
-        total_amount,
-        delivery_address,
-        delivery_lat,
-        delivery_lng,
-        payment_status: 'pending',
-      })
-      .select()
-      .single();
-
-    if (orderError) throw orderError;
-
-    const orderItemsPayload = cartItems.map((ci) => ({
-      order_id: order.id,
-      menu_item_id: ci.menu_items.id,
-      name_snapshot: ci.menu_items.name,
-      price_snapshot: ci.menu_items.price,
-      quantity: ci.quantity,
-      subtotal: Number(ci.menu_items.price) * ci.quantity,
-    }));
-
-    const { error: orderItemsError } = await supabaseAdmin.from('order_items').insert(orderItemsPayload);
-    if (orderItemsError) throw orderItemsError;
-
-    // Cart has been converted into an order - clear it
-    await supabaseAdmin.from('carts').delete().eq('id', activeCart.id);
+    if (!createdOrders.length) return res.status(400).json({ error: 'Your cart is empty.' });
 
     const reference = `delixious_${uuidv4()}`;
     const paystackResponse = await initializeTransaction({
       email: req.user.email,
-      amountKobo: Math.round(total_amount * 100),
+      amountKobo: grandTotalKobo,
       reference,
-      callback_url: `${process.env.FRONTEND_URL}/order-confirmation?order_id=${order.id}`,
-      metadata: { order_id: order.id, user_id: req.user.id },
+      callback_url: `${process.env.FRONTEND_URL}/order-confirmation?checkout_group_id=${checkoutGroupId}`,
+      metadata: { checkout_group_id: checkoutGroupId, user_id: req.user.id },
+      splitSubaccounts,
     });
 
     if (!paystackResponse.status) {
@@ -96,18 +127,22 @@ export async function checkout(req, res, next) {
     }
 
     await supabaseAdmin.from('payments').insert({
-      order_id: order.id,
+      checkout_group_id: checkoutGroupId,
       provider: 'paystack',
       reference,
-      amount: total_amount,
+      amount: grandTotalKobo / 100,
       status: 'pending',
     });
 
-    await supabaseAdmin.from('orders').update({ payment_reference: reference }).eq('id', order.id);
+    await supabaseAdmin
+      .from('orders')
+      .update({ payment_reference: reference })
+      .eq('checkout_group_id', checkoutGroupId);
 
     res.status(201).json({
-      message: 'Order created. Redirect the customer to authorization_url to complete payment.',
-      order,
+      message: 'Orders created. Redirect the customer to authorization_url to complete payment.',
+      orders: createdOrders,
+      checkout_group_id: checkoutGroupId,
       payment: {
         reference,
         authorization_url: paystackResponse.data.authorization_url,
@@ -209,11 +244,7 @@ export async function updateOrderStatus(req, res, next) {
 
 export async function cancelOrder(req, res, next) {
   try {
-    const { data: order, error } = await supabaseAdmin
-      .from('orders')
-      .select('*')
-      .eq('id', req.params.id)
-      .single();
+    const { data: order, error } = await supabaseAdmin.from('orders').select('*').eq('id', req.params.id).single();
 
     if (error || !order) return res.status(404).json({ error: 'Order not found.' });
     if (order.user_id !== req.user.id) {
@@ -237,7 +268,6 @@ export async function cancelOrder(req, res, next) {
   }
 }
 
-// Used by restaurants.routes.js under /api/restaurants/:id/orders (owner dashboard)
 export async function listRestaurantOrders(req, res, next) {
   try {
     const { page, limit } = req.query;
@@ -256,4 +286,4 @@ export async function listRestaurantOrders(req, res, next) {
   } catch (err) {
     next(err);
   }
-}
+        }
