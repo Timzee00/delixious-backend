@@ -1,13 +1,21 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { signup, login, refresh, logout, getMe, updateProfile } from '../controllers/auth.controller.js';
-import { requireAuth } from '../middleware/auth.js';
+import {
+  signup,
+  login,
+  refresh,
+  logout,
+  getMe,
+  updateProfile,
+  submitRiderBankDetails,
+} from '../controllers/auth.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import { signupSchema, loginSchema, updateProfileSchema } from '../schemas/auth.schema.js';
+import { bankDetailsSchema } from '../schemas/payout.schema.js';
 
 const router = Router();
 
-// Brute-force protection: much stricter than the general API limiter.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
@@ -22,5 +30,12 @@ router.post('/refresh', refresh);
 router.post('/logout', logout);
 router.get('/me', requireAuth, getMe);
 router.put('/profile', requireAuth, validate({ body: updateProfileSchema }), updateProfile);
+router.post(
+  '/rider/bank-details',
+  requireAuth,
+  requireRole('delivery_agent'),
+  validate({ body: bankDetailsSchema }),
+  submitRiderBankDetails
+);
 
 export default router;
