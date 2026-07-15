@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { submitBankDetails } from '../controllers/restaurants.controller.js';
+import { bankDetailsSchema } from '../schemas/payout.schema.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireRestaurantOwnership } from '../middleware/ownership.js';
 import { validate } from '../middleware/validate.js';
@@ -33,6 +35,13 @@ router.get('/:id/reviews', validate({ query: listReviewsQuerySchema }), getResta
 router.post('/', requireAuth, requireRole('restaurant_owner', 'admin'), validate({ body: createRestaurantSchema }), createRestaurant);
 router.put('/:id', requireAuth, requireRestaurantOwnership, validate({ body: updateRestaurantSchema }), updateRestaurant);
 router.patch('/:id/toggle-open', requireAuth, requireRestaurantOwnership, toggleOpen);
+router.post(
+  '/:id/bank-details',
+  requireAuth,
+  requireRestaurantOwnership,
+  validate({ body: bankDetailsSchema }),
+  submitBankDetails
+);
 router.delete('/:id', requireAuth, requireRestaurantOwnership, deleteRestaurant);
 router.post(
   '/:id/menu',
