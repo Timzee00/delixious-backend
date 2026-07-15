@@ -38,15 +38,25 @@ export async function submitRiderBankDetails(req, res, next) {
   try {
     const { bank_name, bank_code, account_number } = req.body;
 
-    const paystackResponse = await createSubaccount({
+    const subaccountResponse = await createSubaccount({
       businessName: req.profile.full_name,
       bankCode: bank_code,
       accountNumber: account_number,
-      percentageCharge: 10, // platform's 10% cut of the delivery fee
+      percentageCharge: 10,
     });
 
-    if (!paystackResponse.status) {
+    if (!subaccountResponse.status) {
       return res.status(502).json({ error: 'Could not verify bank details with Paystack. Please check the details and try again.' });
+    }
+
+    const recipientResponse = await createTransferRecipient({
+      name: req.profile.full_name,
+      bankCode: bank_code,
+      accountNumber: account_number,
+    });
+
+    if (!recipientResponse.status) {
+      return res.status(502).json({ error: 'Could not set up payouts with Paystack. Please try again.' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -54,8 +64,9 @@ export async function submitRiderBankDetails(req, res, next) {
       .update({
         rider_bank_name: bank_name,
         rider_bank_account_number: account_number,
-        rider_bank_account_name: paystackResponse.data.account_name,
-        rider_paystack_subaccount_code: paystackResponse.data.subaccount_code,
+        rider_bank_account_name: subaccountResponse.data.account_name,
+        rider_paystack_subaccount_code: subaccountResponse.data.subaccount_code,
+        rider_transfer_recipient_code: recipientResponse.data.recipient_code,
       })
       .eq('id', req.user.id)
       .select()
