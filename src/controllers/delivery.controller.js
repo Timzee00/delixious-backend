@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../config/supabase.js';
+import { initiateTransfer } from '../utils/paystack.js';
 
 const AGENT_TRANSITIONS = {
   assigned: ['picked_up'],
@@ -17,9 +18,49 @@ async function loadOrderWithRestaurant(orderId) {
   return data;
 }
 
-// Lets a restaurant owner look up a delivery agent by phone number before
-// assigning them to an order - deliberately search-only (not a public list)
-// since it exposes agent contact info.
+async function payoutRider(order) {
+  if (order.rider_payout_status === 'paid' || !order.rider_payout_amount) return;
+
+  const { data: tracking } = await supabaseAdmin
+    .from('delivery_tracking')
+    .select('delivery_agent_id')
+    .eq('order_id', order.id)
+    .single();
+
+  if (!tracking?.delivery_agent_id) return;
+
+  const { data: rider } = await supabaseAdmin
+    .from('profiles')
+    .select('rider_transfer_recipient_code')
+    .eq('id', tracking.delivery_agent_id)
+    .single();
+
+  if (!rider?.rider_transfer_recipient_code) {
+    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id);
+    return;
+  }
+
+  try {
+    const reference = `rider_payout_${order.id}`;
+    const transfer = await initiateTransfer({
+      amountKobo: Math.round(order.rider_payout_amount * 100),
+      recipientCode: rider.rider_transfer_recipient_code,
+      reason: `Delivery payout for order #${order.id.slice(0, 8)}`,
+      reference,
+    });
+
+    await supabaseAdmin
+      .from('orders')
+      .update({
+        rider_payout_status: transfer.status ? 'paid' : 'failed',
+        rider_payout_reference: reference,
+      })
+      .eq('id', order.id);
+  } catch {
+    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id);
+  }
+}
+
 export async function searchDeliveryAgents(req, res, next) {
   try {
     const { phone } = req.query;
@@ -28,6 +69,7 @@ export async function searchDeliveryAgents(req, res, next) {
       .from('profiles')
       .select('id, full_name, phone')
       .eq('role', 'delivery_agent')
+      .eq('rider_approval_status', 'approved')
       .ilike('phone', `%${phone.trim()}%`)
       .limit(10);
 
@@ -56,12 +98,15 @@ export async function assignAgent(req, res, next) {
 
     const { data: agentProfile, error: agentError } = await supabaseAdmin
       .from('profiles')
-      .select('id, role, full_name')
+      .select('id, role, full_name, rider_approval_status')
       .eq('id', delivery_agent_id)
       .single();
 
     if (agentError || !agentProfile || agentProfile.role !== 'delivery_agent') {
       return res.status(400).json({ error: 'delivery_agent_id must belong to a valid delivery agent.' });
+    }
+    if (agentProfile.rider_approval_status !== 'approved') {
+      return res.status(400).json({ error: 'This rider is not yet approved to take deliveries.' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -80,6 +125,60 @@ export async function assignAgent(req, res, next) {
     });
 
     res.json({ message: 'Delivery agent assigned.', delivery_tracking: data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Any approved rider can see orders nobody has claimed yet.
+export async function listAvailableDeliveries(req, res, next) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('delivery_tracking')
+      .select('*, orders(id, delivery_address, total_amount, status, restaurants(name, address))')
+      .eq('status', 'pending')
+      .is('delivery_agent_id', null)
+      .order('updated_at', { ascending: true });
+
+    if (error) throw error;
+    res.json({ deliveries: data });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// A rider claims an unassigned delivery for themselves.
+export async function claimDelivery(req, res, next) {
+  try {
+    if (req.profile.rider_approval_status !== 'approved') {
+      return res.status(403).json({ error: 'Your rider account is not yet approved to take deliveries.' });
+    }
+
+    // Conditional update guards against two riders claiming the same
+    // delivery at the same moment - only the first request actually matches.
+    const { data, error } = await supabaseAdmin
+      .from('delivery_tracking')
+      .update({ delivery_agent_id: req.user.id, status: 'assigned', claimed_at: new Date().toISOString() })
+      .eq('order_id', req.params.orderId)
+      .eq('status', 'pending')
+      .is('delivery_agent_id', null)
+      .select()
+      .maybeSingle();
+
+    if (error) throw error;
+    if (!data) return res.status(409).json({ error: 'This delivery has already been claimed by someone else.' });
+
+    const order = await loadOrderWithRestaurant(req.params.orderId);
+    if (order) {
+      await supabaseAdmin.from('notifications').insert({
+        user_id: order.user_id,
+        title: 'Delivery agent assigned',
+        body: `${req.profile.full_name} will be delivering your order.`,
+        type: 'order_update',
+      });
+    }
+
+    res.json({ message: 'Delivery claimed.', delivery_tracking: data });
   } catch (err) {
     next(err);
   }
@@ -145,7 +244,6 @@ export async function updateDeliveryStatus(req, res, next) {
 
     if (updateError) throw updateError;
 
-    // Keep the parent order's status roughly in sync with delivery progress
     const orderStatusMap = { picked_up: 'out_for_delivery', en_route: 'out_for_delivery', delivered: 'delivered' };
     if (orderStatusMap[status]) {
       const { data: order } = await supabaseAdmin
@@ -165,6 +263,10 @@ export async function updateDeliveryStatus(req, res, next) {
               : `Your order is ${status.replace(/_/g, ' ')}.`,
           type: 'order_update',
         });
+
+        if (status === 'delivered') {
+          await payoutRider(order);
+        }
       }
     }
 
@@ -213,12 +315,11 @@ export async function getDeliveryTracking(req, res, next) {
   }
 }
 
-// For the delivery agent's own "my deliveries" dashboard
 export async function listMyDeliveries(req, res, next) {
   try {
     const { data, error } = await supabaseAdmin
       .from('delivery_tracking')
-      .select('*, orders(id, delivery_address, total_amount, status, restaurants(name, address))')
+      .select('*, orders(id, delivery_address, total_amount, status, rider_payout_amount, rider_payout_status, restaurants(name, address))')
       .eq('delivery_agent_id', req.user.id)
       .neq('status', 'delivered')
       .order('updated_at', { ascending: false });
@@ -229,3 +330,20 @@ export async function listMyDeliveries(req, res, next) {
     next(err);
   }
 }
+
+export async function listMyDeliveryHistory(req, res, next) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('delivery_tracking')
+      .select('*, orders(id, delivery_address, total_amount, rider_payout_amount, rider_payout_status, restaurants(name))')
+      .eq('delivery_agent_id', req.user.id)
+      .eq('status', 'delivered')
+      .order('updated_at', { ascending: false })
+      .limit(50);
+
+    if (error) throw error;
+    res.json({ deliveries: data });
+  } catch (err) {
+    next(err);
+  }
+        }
