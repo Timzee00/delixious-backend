@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../config/supabase.js';
-
+import { createSubaccount } from '../utils/paystack.js';
 const PUBLIC_FIELDS =
   'id, name, description, cuisine_type, address, lat, lng, logo_url, cover_image_url, is_open, rating_avg, rating_count, created_at';
 
@@ -118,6 +118,42 @@ export async function deleteRestaurant(req, res, next) {
     if (error) return res.status(400).json({ error: error.message });
     res.json({ message: 'Restaurant deleted.' });
   } catch (err) {
+    next(err);
+  }
+}
+export async function submitBankDetails(req, res, next) {
+  try {
+    const { bank_name, bank_code, account_number } = req.body;
+
+    const paystackResponse = await createSubaccount({
+      businessName: req.restaurant.name,
+      bankCode: bank_code,
+      accountNumber: account_number,
+      percentageCharge: 10, // platform's 10% commission
+    });
+
+    if (!paystackResponse.status) {
+      return res.status(502).json({ error: 'Could not verify bank details with Paystack. Please check the details and try again.' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('restaurants')
+      .update({
+        bank_name,
+        bank_account_number: account_number,
+        bank_account_name: paystackResponse.data.account_name,
+        paystack_subaccount_code: paystackResponse.data.subaccount_code,
+      })
+      .eq('id', req.restaurant.id)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ message: 'Payout account connected.', restaurant: data });
+  } catch (err) {
+    if (err.response?.data?.message) {
+      return res.status(400).json({ error: err.response.data.message });
+    }
     next(err);
   }
 }
