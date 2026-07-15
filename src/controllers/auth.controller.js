@@ -1,5 +1,5 @@
 import { supabaseAdmin, supabaseAnon } from '../config/supabase.js';
-import { createSubaccount } from '../utils/paystack.js';
+import { createSubaccount, createTransferRecipient } from '../utils/paystack.js';
 import { setAuthCookies, clearAuthCookies } from '../utils/authCookies.js';
 import logger from '../utils/logger.js';
 
