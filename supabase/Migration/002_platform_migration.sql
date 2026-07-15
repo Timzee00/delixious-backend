@@ -150,3 +150,7 @@ alter table public.payments add column if not exists checkout_group_id uuid;
 alter table public.orders add column if not exists checkout_group_id uuid;
 create index if not exists idx_orders_checkout_group on public.orders(checkout_group_id);
 create index if not exists idx_payments_checkout_group on public.payments(checkout_group_id);
+alter table public.profiles add column if not exists rider_transfer_recipient_code text;
+alter table public.orders add column if not exists rider_payout_status text not null default 'pending'
+  check (rider_payout_status in ('pending','paid','failed'));
+alter table public.orders add column if not exists rider_payout_reference text;
