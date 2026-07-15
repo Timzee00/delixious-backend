@@ -1,4 +1,5 @@
 import { supabaseAdmin, supabaseAnon } from '../config/supabase.js';
+import { createSubaccount } from '../utils/paystack.js';
 import { setAuthCookies, clearAuthCookies } from '../utils/authCookies.js';
 import logger from '../utils/logger.js';
 
@@ -29,6 +30,43 @@ export async function signup(req, res, next) {
       csrfToken,
     });
   } catch (err) {
+    next(err);
+  }
+}
+
+export async function submitRiderBankDetails(req, res, next) {
+  try {
+    const { bank_name, bank_code, account_number } = req.body;
+
+    const paystackResponse = await createSubaccount({
+      businessName: req.profile.full_name,
+      bankCode: bank_code,
+      accountNumber: account_number,
+      percentageCharge: 10, // platform's 10% cut of the delivery fee
+    });
+
+    if (!paystackResponse.status) {
+      return res.status(502).json({ error: 'Could not verify bank details with Paystack. Please check the details and try again.' });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('profiles')
+      .update({
+        rider_bank_name: bank_name,
+        rider_bank_account_number: account_number,
+        rider_bank_account_name: paystackResponse.data.account_name,
+        rider_paystack_subaccount_code: paystackResponse.data.subaccount_code,
+      })
+      .eq('id', req.user.id)
+      .select()
+      .single();
+
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ message: 'Payout account connected.', profile: data });
+  } catch (err) {
+    if (err.response?.data?.message) {
+      return res.status(400).json({ error: err.response.data.message });
+    }
     next(err);
   }
 }
