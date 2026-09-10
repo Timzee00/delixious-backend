@@ -18,9 +18,7 @@ export async function listRestaurantsAdmin(req, res, next) {
 
     let query = supabaseAdmin
       .from('restaurants')
-      .select('id, name, cuisine_type, address, approval_status, paystack_subaccount_code, owner_id, created_at', {
-        count: 'exact',
-      })
+      .select('id, name, cuisine_type, address, approval_status, owner_id, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
 
@@ -28,7 +26,6 @@ export async function listRestaurantsAdmin(req, res, next) {
 
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
-
     res.json({ restaurants: data, total: count, page, limit });
   } catch (err) {
     next(err);
@@ -59,10 +56,7 @@ export async function listRidersAdmin(req, res, next) {
 
     const { data, error, count } = await supabaseAdmin
       .from('profiles')
-      .select(
-        'id, full_name, email, phone, rider_approval_status, rider_paystack_subaccount_code, rider_rating_avg, rider_rating_count, created_at',
-        { count: 'exact' }
-      )
+      .select('id, full_name, email, phone, rider_approval_status, rider_rating_avg, rider_rating_count, created_at', { count: 'exact' })
       .eq('role', 'delivery_agent')
       .order('created_at', { ascending: false })
       .range(from, to);
@@ -107,7 +101,6 @@ export async function listUsersAdmin(req, res, next) {
 
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
-
     res.json({ users: data, total: count, page, limit });
   } catch (err) {
     next(err);
@@ -138,9 +131,7 @@ export async function listOrdersAdmin(req, res, next) {
 
     const { data, error, count } = await supabaseAdmin
       .from('orders')
-      .select('id, user_id, restaurant_id, status, total_amount, platform_commission, created_at', {
-        count: 'exact',
-      })
+      .select('id, user_id, restaurant_id, status, total_amount, platform_commission, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
 
@@ -165,7 +156,7 @@ export async function sendBroadcast(req, res, next) {
       user_id: u.id,
       type: 'broadcast',
       title,
-      message,
+      body: message,
     }));
 
     if (rows.length) {
@@ -177,4 +168,4 @@ export async function sendBroadcast(req, res, next) {
   } catch (err) {
     next(err);
   }
-  }
+}
