@@ -2,6 +2,18 @@ import { supabaseAdmin } from '../config/supabase.js';
 
 export async function getRestaurantMenu(req, res, next) {
   try {
+    // Only expose menus belonging to publicly approved restaurants.
+    const { data: restaurant, error: restaurantError } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('id', req.params.id)
+      .eq('approval_status', 'approved')
+      .single();
+
+    if (restaurantError || !restaurant) {
+      return res.status(404).json({ error: 'Restaurant not found.' });
+    }
+
     const { data, error } = await supabaseAdmin
       .from('menu_items')
       .select('*')
