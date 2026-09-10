@@ -5,12 +5,16 @@ import logger from '../utils/logger.js';
 
 export async function signup(req, res, next) {
   try {
-    const { email, password, full_name, phone, role } = req.body;
+    const { email, password, full_name, phone, role = 'customer' } = req.body;
+
+    // Never accept the privileged admin role from public signup.
+    // The database trigger also enforces this as defense-in-depth.
+    const safeRole = role === 'restaurant_owner' || role === 'delivery_agent' ? role : 'customer';
 
     const { data, error } = await supabaseAnon.auth.signUp({
       email,
       password,
-      options: { data: { full_name, phone, role } },
+      options: { data: { full_name, phone, role: safeRole } },
     });
 
     if (error) {
@@ -92,7 +96,19 @@ export async function login(req, res, next) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', data.user.id).single();
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .eq('id', data.user.id)
+      .single();
+
+    if (profileError || !profile) {
+      return res.status(500).json({ error: 'Your account profile could not be loaded. Please contact support.' });
+    }
+
+    if (profile.is_suspended) {
+      return res.status(403).json({ error: 'This account has been suspended. Please contact support.', code: 'ACCOUNT_SUSPENDED' });
+    }
 
     const csrfToken = setAuthCookies(res, data.session);
 
@@ -124,7 +140,21 @@ export async function refresh(req, res, next) {
         .json({ error: 'Your session has expired. Please log in again.', code: 'TOKEN_EXPIRED' });
     }
 
-    const { data: profile } = await supabaseAdmin.from('profiles').select('*').eq('id', data.user.id).single();
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .eq('id', data.user.id)
+      .single();
+
+    if (profileError || !profile) {
+      clearAuthCookies(res);
+      return res.status(401).json({ error: 'Your account profile could not be loaded.', code: 'PROFILE_NOT_FOUND' });
+    }
+
+    if (profile.is_suspended) {
+      clearAuthCookies(res);
+      return res.status(403).json({ error: 'This account has been suspended. Please contact support.', code: 'ACCOUNT_SUSPENDED' });
+    }
 
     const csrfToken = setAuthCookies(res, data.session);
 
@@ -166,9 +196,18 @@ export async function getMe(req, res) {
 
 export async function updateProfile(req, res, next) {
   try {
+    // The validation schema should only allow profile fields. Keep an explicit
+    // allow-list here as defense-in-depth so a future schema change cannot
+    // accidentally expose role, suspension, approval or payout fields.
+    const { full_name, phone, avatar_url } = req.body;
+    const updates = {};
+    if (full_name !== undefined) updates.full_name = full_name;
+    if (phone !== undefined) updates.phone = phone;
+    if (avatar_url !== undefined) updates.avatar_url = avatar_url;
+
     const { data, error } = await supabaseAdmin
       .from('profiles')
-      .update(req.body)
+      .update(updates)
       .eq('id', req.user.id)
       .select()
       .single();
