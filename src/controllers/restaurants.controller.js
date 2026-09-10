@@ -5,8 +5,6 @@ const PUBLIC_FIELDS =
 
 export async function listRestaurants(req, res, next) {
   try {
-    // req.query is already validated + coerced (numbers, defaults) by
-    // validate({ query: listRestaurantsQuerySchema }) in the route.
     const { search, cuisine, is_open, page, limit } = req.query;
     const from = (page - 1) * limit;
     const to = from + limit - 1;
@@ -14,6 +12,7 @@ export async function listRestaurants(req, res, next) {
     let query = supabaseAdmin
       .from('restaurants')
       .select(PUBLIC_FIELDS, { count: 'exact' })
+      .eq('approval_status', 'approved')
       .order('rating_avg', { ascending: false })
       .range(from, to);
 
@@ -23,7 +22,6 @@ export async function listRestaurants(req, res, next) {
 
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
-
     res.json({ restaurants: data, total: count, page, limit });
   } catch (err) {
     next(err);
@@ -36,8 +34,8 @@ export async function getRestaurant(req, res, next) {
       .from('restaurants')
       .select(PUBLIC_FIELDS)
       .eq('id', req.params.id)
+      .eq('approval_status', 'approved')
       .single();
-
     if (error || !data) return res.status(404).json({ error: 'Restaurant not found.' });
     res.json({ restaurant: data });
   } catch (err) {
@@ -52,7 +50,6 @@ export async function getMyRestaurants(req, res, next) {
       .select('*')
       .eq('owner_id', req.user.id)
       .order('created_at', { ascending: false });
-
     if (error) return res.status(400).json({ error: error.message });
     res.json({ restaurants: data });
   } catch (err) {
@@ -62,14 +59,11 @@ export async function getMyRestaurants(req, res, next) {
 
 export async function createRestaurant(req, res, next) {
   try {
-    // req.body is already validated (name/address required, etc) by
-    // validate({ body: createRestaurantSchema }) in the route.
     const { data, error } = await supabaseAdmin
       .from('restaurants')
       .insert({ ...req.body, owner_id: req.user.id })
       .select()
       .single();
-
     if (error) return res.status(400).json({ error: error.message });
     res.status(201).json({ message: 'Restaurant created.', restaurant: data });
   } catch (err) {
@@ -79,16 +73,12 @@ export async function createRestaurant(req, res, next) {
 
 export async function updateRestaurant(req, res, next) {
   try {
-    // updateRestaurantSchema.partial() already limits req.body to known,
-    // optional fields - zod strips anything else, so no manual allow-list
-    // is needed here anymore.
     const { data, error } = await supabaseAdmin
       .from('restaurants')
       .update(req.body)
       .eq('id', req.restaurant.id)
       .select()
       .single();
-
     if (error) return res.status(400).json({ error: error.message });
     res.json({ message: 'Restaurant updated.', restaurant: data });
   } catch (err) {
@@ -104,7 +94,6 @@ export async function toggleOpen(req, res, next) {
       .eq('id', req.restaurant.id)
       .select()
       .single();
-
     if (error) return res.status(400).json({ error: error.message });
     res.json({ message: `Restaurant is now ${data.is_open ? 'open' : 'closed'}.`, restaurant: data });
   } catch (err) {
@@ -121,17 +110,16 @@ export async function deleteRestaurant(req, res, next) {
     next(err);
   }
 }
+
 export async function submitBankDetails(req, res, next) {
   try {
     const { bank_name, bank_code, account_number } = req.body;
-
     const paystackResponse = await createSubaccount({
       businessName: req.restaurant.name,
       bankCode: bank_code,
       accountNumber: account_number,
-      percentageCharge: 10, // platform's 10% commission
+      percentageCharge: 10,
     });
-
     if (!paystackResponse.status) {
       return res.status(502).json({ error: 'Could not verify bank details with Paystack. Please check the details and try again.' });
     }
@@ -147,13 +135,10 @@ export async function submitBankDetails(req, res, next) {
       .eq('id', req.restaurant.id)
       .select()
       .single();
-
     if (error) return res.status(400).json({ error: error.message });
     res.json({ message: 'Payout account connected.', restaurant: data });
   } catch (err) {
-    if (err.response?.data?.message) {
-      return res.status(400).json({ error: err.response.data.message });
-    }
+    if (err.response?.data?.message) return res.status(400).json({ error: err.response.data.message });
     next(err);
   }
 }
