@@ -7,21 +7,9 @@ const FEED_FIELDS = `
 
 export async function listMenuFeed(req, res, next) {
   try {
-    const { q, cuisine, page, limit, favorite } = req.query;
+    const { q, cuisine, restaurant_ids, page, limit } = req.query;
     const from = (page - 1) * limit;
     const to = from + limit - 1;
-    let restaurantIds = null;
-
-    if (favorite === 'true') {
-      if (!req.user?.id) return res.status(401).json({ error: 'You must be logged in to view favorite dishes.' });
-      const { data: favorites, error: favoriteError } = await supabaseAdmin
-        .from('restaurant_favorites')
-        .select('restaurant_id')
-        .eq('user_id', req.user.id);
-      if (favoriteError) throw favoriteError;
-      restaurantIds = (favorites || []).map((row) => row.restaurant_id);
-      if (!restaurantIds.length) return res.json({ menu_items: [], total: 0, page, limit });
-    }
 
     let query = supabaseAdmin
       .from('menu_items')
@@ -33,7 +21,10 @@ export async function listMenuFeed(req, res, next) {
 
     if (q) query = query.or(`name.ilike.%${q}%,description.ilike.%${q}%`);
     if (cuisine) query = query.eq('restaurants.cuisine_type', cuisine);
-    if (restaurantIds) query = query.in('restaurant_id', restaurantIds);
+    if (restaurant_ids) {
+      const ids = restaurant_ids.split(',').map((id) => id.trim()).filter(Boolean);
+      if (ids.length) query = query.in('restaurant_id', ids);
+    }
 
     const { data, error, count } = await query;
     if (error) throw error;
@@ -46,22 +37,12 @@ export async function listMenuFeed(req, res, next) {
 export async function getRestaurantMenu(req, res, next) {
   try {
     const { data: restaurant, error: restaurantError } = await supabaseAdmin
-      .from('restaurants')
-      .select('id')
-      .eq('id', req.params.id)
-      .eq('approval_status', 'approved')
-      .single();
-
+      .from('restaurants').select('id').eq('id', req.params.id).eq('approval_status', 'approved').single();
     if (restaurantError || !restaurant) return res.status(404).json({ error: 'Restaurant not found.' });
 
-    const { data, error } = await supabaseAdmin
-      .from('menu_items')
-      .select('*')
-      .eq('restaurant_id', req.params.id)
-      .eq('is_available', true)
-      .order('category', { ascending: true })
-      .order('name', { ascending: true });
-
+    const { data, error } = await supabaseAdmin.from('menu_items').select('*')
+      .eq('restaurant_id', req.params.id).eq('is_available', true)
+      .order('category', { ascending: true }).order('name', { ascending: true });
     if (error) return res.status(400).json({ error: error.message });
 
     const grouped_by_category = data.reduce((acc, item) => {
@@ -70,7 +51,6 @@ export async function getRestaurantMenu(req, res, next) {
       acc[key].push(item);
       return acc;
     }, {});
-
     res.json({ menu_items: data, grouped_by_category });
   } catch (err) { next(err); }
 }
