@@ -45,6 +45,18 @@ export async function getRestaurantReviews(req, res, next) {
     const from = (page - 1) * limit;
     const to = from + limit - 1;
 
+    // Do not expose reviews for restaurants that are not publicly approved.
+    const { data: restaurant, error: restaurantError } = await supabaseAdmin
+      .from('restaurants')
+      .select('id')
+      .eq('id', req.params.id)
+      .eq('approval_status', 'approved')
+      .single();
+
+    if (restaurantError || !restaurant) {
+      return res.status(404).json({ error: 'Restaurant not found.' });
+    }
+
     const { data, error, count } = await supabaseAdmin
       .from('reviews')
       .select('id, rating, comment, created_at, user_id', { count: 'exact' })
