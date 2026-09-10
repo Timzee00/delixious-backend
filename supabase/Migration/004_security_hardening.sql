@@ -20,8 +20,6 @@ security definer
 set search_path = public
 as $$
 begin
-  -- auth.uid() is populated for normal Supabase authenticated requests.
-  -- Service-role/backend operations do not run as the user's auth identity.
   if auth.uid() = old.id then
     if new.role is distinct from old.role
       or new.is_suspended is distinct from old.is_suspended
@@ -32,8 +30,7 @@ begin
       or new.rider_bank_account_name is distinct from old.rider_bank_account_name
       or new.rider_transfer_recipient_code is distinct from old.rider_transfer_recipient_code
     then
-      raise exception 'Protected profile fields cannot be changed by the account owner.'
-        using errcode = '42501';
+      raise exception 'Protected profile fields cannot be changed by the account owner.' using errcode = '42501';
     end if;
   end if;
   return new;
@@ -56,7 +53,6 @@ declare
   requested_role text;
 begin
   requested_role := new.raw_user_meta_data->>'role';
-
   insert into public.profiles (id, full_name, phone, role)
   values (
     new.id,
@@ -68,7 +64,6 @@ begin
     end
   )
   on conflict (id) do nothing;
-
   return new;
 end;
 $$;
@@ -81,6 +76,13 @@ alter table public.orders add constraint orders_rider_payout_status_check
 create unique index if not exists idx_orders_rider_payout_reference
   on public.orders(rider_payout_reference)
   where rider_payout_reference is not null;
+
+-- Payment processing state prevents duplicate webhook/verification handling.
+alter table public.payments drop constraint if exists payments_status_check;
+alter table public.payments add constraint payments_status_check
+  check (status in ('pending', 'processing', 'success', 'failed'));
+
+create index if not exists idx_payments_checkout_group on public.payments(checkout_group_id);
 
 -- Public restaurant discovery should expose only approved restaurants.
 create index if not exists idx_restaurants_approval_name
