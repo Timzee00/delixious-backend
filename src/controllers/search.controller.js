@@ -8,13 +8,15 @@ export async function search(req, res, next) {
       supabaseAdmin
         .from('restaurants')
         .select('id, name, cuisine_type, logo_url, is_open, rating_avg')
+        .eq('approval_status', 'approved')
         .or(`name.ilike.%${term}%,cuisine_type.ilike.%${term}%`)
         .limit(20),
       supabaseAdmin
         .from('menu_items')
-        .select('id, name, price, image_url, restaurant_id, restaurants(id, name, is_open)')
+        .select('id, name, price, image_url, restaurant_id, restaurants!inner(id, name, is_open, approval_status)')
         .ilike('name', `%${term}%`)
         .eq('is_available', true)
+        .eq('restaurants.approval_status', 'approved')
         .limit(20),
     ]);
 
