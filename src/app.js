@@ -21,6 +21,7 @@ import paymentsRoutes from './routes/payments.routes.js';
 import deliveryRoutes from './routes/delivery.routes.js';
 import reviewsRoutes from './routes/reviews.routes.js';
 import notificationsRoutes from './routes/notifications.routes.js';
+import favoritesRoutes from './routes/favorites.routes.js';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler.js';
 import { csrfProtection } from './middleware/csrf.js';
 import { requestContext } from './middleware/requestContext.js';
@@ -30,37 +31,15 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.set("trust proxy", 1);
+app.set('trust proxy', 1);
 
-// ---------- Security & parsing ----------
-// CSP disabled: this is a JSON API (no HTML rendering), and it would
-// otherwise block Swagger UI's inline scripts at /api/docs. Every other
-// helmet protection (X-Frame-Options, X-Content-Type-Options, HSTS, etc)
-// stays on.
 app.use(helmet({ contentSecurityPolicy: false }));
-
-app.use(
-  cors({
-    // '*' is invalid alongside credentials: true (browsers reject it), so
-    // fall back to a concrete origin rather than a wildcard.
-    origin: process.env.FRONTEND_URL || 'http://localhost:5173',
-    credentials: true,
-  })
-);
-
+app.use(cors({ origin: process.env.FRONTEND_URL || 'http://localhost:5173', credentials: true }));
 app.use(cookieParser());
-app.use(
-  express.json({
-    limit: '2mb',
-    verify: (req, res, buf) => {
-      req.rawBody = buf;
-    },
-  })
-);
+app.use(express.json({ limit: '2mb', verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(requestContext);
 app.use(csrfProtection);
 
-// ---------- Rate limiting ----------
 const limiter = rateLimit({
   windowMs: Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max: Number(process.env.RATE_LIMIT_MAX) || 200,
@@ -70,16 +49,11 @@ const limiter = rateLimit({
 });
 app.use('/api', limiter);
 
-// ---------- Health check (for Render/uptime monitors) ----------
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
-// ---------- API documentation ----------
 const openapiDocument = JSON.parse(fs.readFileSync(path.join(__dirname, '../openapi.json'), 'utf-8'));
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openapiDocument));
 
-// ---------- Routes ----------
 app.use('/api/auth', authRoutes);
 app.use('/api/restaurants', restaurantsRoutes);
 app.use('/api/menu-items', menuItemsRoutes);
@@ -91,9 +65,9 @@ app.use('/api/payments', paymentsRoutes);
 app.use('/api/delivery', deliveryRoutes);
 app.use('/api/reviews', reviewsRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/favorites', favoritesRoutes);
 app.use('/api/admin', adminRoutes);
 
-// ---------- 404 + error handling ----------
 app.use(notFoundHandler);
 app.use(errorHandler);
 
