@@ -1,6 +1,10 @@
 import { generateCsrfToken } from '../middleware/csrf.js';
 
-const isProduction = process.env.NODE_ENV === 'production';
+// Render should set NODE_ENV=production, but also recognize the hosted
+// frontend URL so cookies remain secure if NODE_ENV is omitted/misconfigured.
+const isProduction =
+  process.env.NODE_ENV === 'production' ||
+  /^https:\/\//i.test(process.env.FRONTEND_URL || '');
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
 function baseCookieOptions() {
