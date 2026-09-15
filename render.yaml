@@ -1,0 +1,38 @@
+services:
+  - type: web
+    name: delixious-platform
+    runtime: node
+    plan: free
+    region: frankfurt
+    branch: main
+    autoDeployTrigger: commit
+    buildCommand: npm ci && rm -rf frontend && git clone --depth 1 https://github.com/Timzee00/delixious-frontend.git frontend && npm ci --prefix frontend && npm run build --prefix frontend
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_PUBLIC_KEY
+        sync: false
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "900000"
+      - key: RATE_LIMIT_MAX
+        value: "200"
+      - key: LOG_LEVEL
+        value: info
+      - key: VITE_API_URL
+        value: /api
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
