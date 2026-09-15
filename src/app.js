@@ -68,6 +68,21 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/favorites', favoritesRoutes);
 app.use('/api/admin', adminRoutes);
 
+// Production deployment: Render serves the React/Vite frontend from this
+// same Express service. This keeps browser auth cookies and API requests on
+// one origin while retaining the existing /api routes.
+const frontendDist = path.resolve(__dirname, '../frontend/dist');
+const frontendIndex = path.join(frontendDist, 'index.html');
+if (fs.existsSync(frontendIndex)) {
+  app.use(express.static(frontendDist, { index: false }));
+  app.get('*', (req, res, next) => {
+    if (req.path === '/health' || req.path.startsWith('/api/')) return next();
+    return res.sendFile(frontendIndex);
+  });
+} else {
+  logger.warn(`Frontend build not found at ${frontendDist}; API-only mode is active.`);
+}
+
 app.use(notFoundHandler);
 app.use(errorHandler);
 
