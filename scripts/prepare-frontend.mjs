@@ -24,7 +24,7 @@ try {
   }
 
   run('git', ['clone', '--depth', '1', 'https://github.com/Timzee00/delixious-frontend.git', 'frontend']);
-  run('npm', ['ci', '--prefix', 'frontend']);
+  run('npm', ['ci', '--include=dev', '--prefix', 'frontend']);
   run('npm', ['run', 'build', '--prefix', 'frontend']);
 } catch (error) {
   console.error('[delixious] Frontend preparation failed.');
