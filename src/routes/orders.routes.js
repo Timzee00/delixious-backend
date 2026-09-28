@@ -4,6 +4,7 @@ import { validate } from '../middleware/validate.js';
 import {
   checkout,
   listMyOrders,
+  getOrderGroup,
   getOrder,
   updateOrderStatus,
   cancelOrder,
@@ -14,6 +15,7 @@ const router = Router();
 
 router.post('/checkout', requireAuth, validate({ body: checkoutSchema }), checkout);
 router.get('/', requireAuth, validate({ query: listOrdersQuerySchema }), listMyOrders);
+router.get('/group/:checkoutGroupId', requireAuth, getOrderGroup);
 router.get('/:id', requireAuth, getOrder);
 router.patch('/:id/status', requireAuth, validate({ body: updateOrderStatusSchema }), updateOrderStatus);
 router.patch('/:id/cancel', requireAuth, cancelOrder);
