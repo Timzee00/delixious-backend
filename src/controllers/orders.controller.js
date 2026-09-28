@@ -125,7 +125,7 @@ export async function checkout(req, res, next) {
         email: req.user.email,
         amountKobo: grandTotalKobo,
         reference,
-        callback_url: `${process.env.FRONTEND_URL}/order-confirmation?checkout_group_id=${checkoutGroupId}`,
+        callback_url: `${process.env.FRONTEND_URL}/order-confirmation?checkout_group_id=${encodeURIComponent(checkoutGroupId)}&reference=${encodeURIComponent(reference)}`,
         metadata: { checkout_group_id: checkoutGroupId, user_id: req.user.id },
         splitSubaccounts,
       });
@@ -186,6 +186,24 @@ export async function listMyOrders(req, res, next) {
       .range(from, to);
     if (error) throw error;
     res.json({ orders: data, total: count, page, limit });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function getOrderGroup(req, res, next) {
+  try {
+    const { data, error } = await supabaseAdmin
+      .from('orders')
+      .select('*, restaurants(id, name, logo_url, owner_id), order_items(*), delivery_tracking(*)')
+      .eq('checkout_group_id', req.params.checkoutGroupId)
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: true });
+
+    if (error) throw error;
+    if (!data?.length) return res.status(404).json({ error: 'Checkout group not found.' });
+
+    res.json({ orders: data, checkout_group_id: req.params.checkoutGroupId });
   } catch (err) {
     next(err);
   }
