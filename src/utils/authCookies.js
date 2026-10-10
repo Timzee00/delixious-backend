@@ -11,10 +11,9 @@ function baseCookieOptions() {
   return {
     httpOnly: true,
     secure: isProduction,
-    // Production API requests are same-origin through the Netlify /api proxy,
-    // so Lax is safer and avoids the stricter cross-site cookie requirements.
-    // Local development can remain cross-site when frontend/backend run apart.
-    sameSite: isProduction ? 'lax' : 'none',
+    // Lax works on same-site localhost ports and on same-origin production hosting.
+    // SameSite=None without Secure is rejected by modern browsers.
+    sameSite: 'lax',
   };
 }
 
@@ -37,7 +36,7 @@ export function setAuthCookies(res, session) {
   res.cookie('csrf_token', csrfToken, {
     httpOnly: false,
     secure: isProduction,
-    sameSite: isProduction ? 'lax' : 'none',
+    sameSite: 'lax',
     path: '/',
     maxAge: THIRTY_DAYS_MS,
   });
