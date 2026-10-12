@@ -35,7 +35,7 @@ export async function listRestaurantsAdmin(req, res, next) {
 
     let query = supabaseAdmin
       .from('restaurants')
-      .select('id, name, cuisine_type, address, approval_status, owner_id, created_at', { count: 'exact' })
+      .select('id, name, cuisine_type, address, approval_status, owner_id, created_at, paystack_subaccount_code', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
 
@@ -43,7 +43,9 @@ export async function listRestaurantsAdmin(req, res, next) {
 
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ restaurants: data, total: count, page, limit });
+    // Show payout readiness without exposing sensitive provider identifiers.
+    const restaurants = (data || []).map(({ paystack_subaccount_code, ...restaurant }) => ({ ...restaurant, payout_ready: Boolean(paystack_subaccount_code) }));
+    res.json({ restaurants, total: count, page, limit });
   } catch (err) {
     next(err);
   }
