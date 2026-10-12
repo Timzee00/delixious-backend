@@ -126,6 +126,16 @@ export async function listUsersAdmin(req, res, next) {
 
 export async function setUserSuspension(req, res, next) {
   try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: 'You cannot suspend your own administrator account.' });
+    }
+    const { data: target, error: targetError } = await supabaseAdmin
+      .from('profiles').select('id, role').eq('id', req.params.id).maybeSingle();
+    if (targetError) throw targetError;
+    if (!target) return res.status(404).json({ error: 'Account not found.' });
+    if (target.role === 'admin') {
+      return res.status(403).json({ error: 'Administrator suspension requires a separate privileged review process.' });
+    }
     const { data, error } = await supabaseAdmin
       .from('profiles')
       .update({ is_suspended: req.body.suspended })
