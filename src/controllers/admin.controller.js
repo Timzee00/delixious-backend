@@ -171,28 +171,27 @@ export async function listOrdersAdmin(req, res, next) {
 
 export async function sendBroadcast(req, res, next) {
   try {
+    // A synchronous request must not fan out to arbitrarily many accounts.
+    // High-volume campaigns require a durable queued worker with retries,
+    // rate limiting, opt-outs, and an auditable campaign state.
     const { title, message, role } = req.body;
-
-    let query = supabaseAdmin.from('profiles').select('id');
+    let query = supabaseAdmin.from('profiles').select('id', { count: 'exact' });
     if (role) query = query.eq('role', role);
-
-    const { data: users, error: usersError } = await query;
-    if (usersError) return res.status(400).json({ error: usersError.message });
-
-    const rows = users.map((u) => ({
-      user_id: u.id,
-      type: 'broadcast',
-      title,
-      body: message,
-    }));
-
-    if (rows.length) {
-      const { error: insertError } = await supabaseAdmin.from('notifications').insert(rows);
-      if (insertError) return res.status(400).json({ error: insertError.message });
+    const { data: users, count, error: usersError } = await query.range(0, 100);
+    if (usersError) throw usersError;
+    if ((count ?? 0) > 100) {
+      return res.status(409).json({
+        code: 'BROADCAST_QUEUE_REQUIRED',
+        error: 'This audience exceeds the safe synchronous broadcast limit. Use a queued campaign when available.',
+      });
     }
-
+    const rows = (users || []).map((u) => ({
+      user_id: u.id, type: 'broadcast', title, body: message,
+    }));
+    if (rows.length) {
+      const { error } = await supabaseAdmin.from('notifications').insert(rows);
+      if (error) throw error;
+    }
     res.status(201).json({ message: `Broadcast sent to ${rows.length} user(s).` });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 }
