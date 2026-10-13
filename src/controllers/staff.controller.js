@@ -88,23 +88,20 @@ export async function acceptTeamInvite(req, res, next) {
     if (invite.email !== req.user.email?.toLowerCase()) {
       return res.status(403).json({ error: 'This invitation is for a different verified email address.' });
     }
-    // Conditional consumption limits token replay; staging tests must also
-    // cover membership persistence failure and concurrent acceptance.
-    const { data: consumed, error: consumeError } = await supabaseAdmin
-      .from('restaurant_staff_invites')
-      .update({ accepted_at: new Date().toISOString() })
-      .eq('id', invite.id).is('accepted_at', null)
-      .gt('expires_at', new Date().toISOString())
-      .select('id').maybeSingle();
-    if (consumeError) throw consumeError;
-    if (!consumed) return res.status(409).json({ error: 'This invitation was already accepted.' });
-    const { error: joinError } = await supabaseAdmin.from('restaurant_staff')
-      .upsert({
-        restaurant_id: invite.restaurant_id, user_id: req.user.id,
-        staff_role: invite.staff_role, active: true, invited_by: null,
-      }, { onConflict: 'restaurant_id,user_id' });
-    if (joinError) throw joinError;
-    res.json({ message: 'You have joined the restaurant team.', restaurant_id: invite.restaurant_id });
+    // One database transaction enforces token consumption and membership
+    // creation together; two simultaneous acceptances cannot both win.
+    const { data: joinedRestaurant, error: joinError } = await supabaseAdmin.rpc('accept_restaurant_staff_invite', {
+      p_token_hash: token_hash,
+      p_user_id: req.user.id,
+      p_email: req.user.email,
+    });
+    if (joinError) {
+      if (joinError.message?.includes('INVALID_OR_EXPIRED_INVITE')) {
+        return res.status(410).json({ error: 'This invitation has expired or was already accepted.' });
+      }
+      throw joinError;
+    }
+    res.json({ message: 'You have joined the restaurant team.', restaurant_id: joinedRestaurant });
   } catch (err) { next(err); }
 }
 
