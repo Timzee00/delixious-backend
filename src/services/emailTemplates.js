@@ -1,7 +1,7 @@
 const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (value) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 }[value]));
-const line = (value) => String(value ?? '').slice(0,200);
+const line = (value) => String(value ?? '').replace(/[\\r\\n\\u0000-\\u001f\\u007f]+/g, ' ').trim().slice(0,200);
 function safeLink(raw) {
   try {
     const url = new URL(String(raw));
