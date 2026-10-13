@@ -120,6 +120,35 @@ export async function getPayoutBanks(req, res, next) {
   }
 }
 
+export async function verifyRestaurantBank(req, res, next) {
+  try {
+    const { bank_code, account_number } = req.body;
+    const directory = await listBanks();
+    if (!directory.status || !Array.isArray(directory.data)) {
+      return res.status(502).json({ error: 'Bank verification is temporarily unavailable.' });
+    }
+    const bank = directory.data.find((item) =>
+      String(item.code) === bank_code && item.active !== false
+    );
+    if (!bank) return res.status(400).json({ error: 'Choose a supported bank.' });
+    const result = await resolveBankAccount({ bankCode: bank_code, accountNumber: account_number });
+    if (!result.status || !result.data?.account_name) {
+      return res.status(400).json({ error: 'Could not verify the account holder.' });
+    }
+    res.set('Cache-Control', 'private, no-store');
+    res.json({
+      bank_name: bank.name,
+      account_name: result.data.account_name,
+      account_last4: account_number.slice(-4),
+    });
+  } catch (err) {
+    if (err.response || err.code === 'ECONNABORTED') {
+      return res.status(400).json({ error: 'Bank verification failed. Check your details and try again.' });
+    }
+    next(err);
+  }
+}
+
 export async function submitBankDetails(req, res, next) {
   try {
     if (req.restaurant.paystack_subaccount_code) {
