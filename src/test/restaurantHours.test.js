@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { DEFAULT_WEEKLY_HOURS, restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
+import { DEFAULT_WEEKLY_HOURS, restaurantAcceptingBySchedule, getRestaurantAvailability } from '../utils/restaurantHours.js';
 
 describe('restaurant scheduled availability in Lagos', () => {
   it('defaults to closed on Sunday', () => {
@@ -27,5 +27,32 @@ describe('restaurant scheduled availability in Lagos', () => {
 
   it('fails closed on incomplete invalid hours', () => {
     expect(restaurantAcceptingBySchedule(null)).toBe(false);
+  });
+});
+
+describe('effective customer-facing restaurant availability', () => {
+  const now = new Date('2026-10-12T12:00:00Z'); // Monday, 13:00 Lagos
+  const opened = { is_open: true };
+  const scheduled = { schedule_enabled: true, weekly_hours: DEFAULT_WEEKLY_HOURS };
+
+  it('does not reopen a manually closed restaurant', () => {
+    expect(getRestaurantAvailability({ is_open: false }, scheduled, now))
+      .toEqual({ accepting_orders: false, availability_reason: 'manually_closed' });
+  });
+
+  it('automatically expires a temporary pause after its deadline', () => {
+    const paused = { ...scheduled, paused_until: '2026-10-12T14:00:00Z' };
+    expect(getRestaurantAvailability(opened, paused, now).availability_reason).toBe('temporarily_paused');
+    expect(getRestaurantAvailability(opened, paused, new Date('2026-10-12T14:00:00Z')).accepting_orders).toBe(true);
+  });
+
+  it('honors planned hours even after a temporary pause expires', () => {
+    const closedTime = new Date('2026-10-12T22:00:00Z');
+    expect(getRestaurantAvailability(opened, { ...scheduled, paused_until: '2026-10-12T12:00:00Z' }, closedTime))
+      .toEqual({ accepting_orders: false, availability_reason: 'outside_hours' });
+  });
+
+  it('defaults to manual status before owners turn on scheduled hours', () => {
+    expect(getRestaurantAvailability(opened, undefined, now).accepting_orders).toBe(true);
   });
 });
