@@ -286,6 +286,12 @@ export async function cancelOrder(req, res, next) {
     const { data: order, error } = await supabaseAdmin.from('orders').select('*').eq('id', req.params.id).single();
     if (error || !order) return res.status(404).json({ error: 'Order not found.' });
     if (order.user_id !== req.user.id) return res.status(403).json({ error: 'You can only cancel your own orders.' });
+    if (order.payment_status === 'paid') {
+      return res.status(409).json({
+        code: 'PAID_ORDER_REQUIRES_REFUND',
+        error: 'This order is already paid. Contact Delixious support to request cancellation and a refund; your payment will not be silently forfeited.',
+      });
+    }
     if (!['pending', 'confirmed'].includes(order.status)) return res.status(400).json({ error: `Order can no longer be cancelled (status: ${order.status}).` });
     const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status: 'cancelled' }).eq('id', order.id).eq('status', order.status).select().single();
     if (updateError) throw updateError;
