@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
-import { submitBankDetails, getPayoutBanks } from '../controllers/restaurants.controller.js';
+import { submitBankDetails, getPayoutBanks, verifyRestaurantBank } from '../controllers/restaurants.controller.js';
 import { restaurantBankDetailsSchema } from '../schemas/payout.schema.js';
 import { operatingSettingsSchema } from '../schemas/operatingSettings.schema.js';
 import { getOperatingSettings, updateOperatingSettings } from '../controllers/operatingSettings.controller.js';
@@ -46,6 +46,7 @@ router.patch('/:id/toggle-open', requireAuth, requireRestaurantOwnership, toggle
 router.get('/:id/overview', requireAuth, requireRestaurantOwnership, getMerchantOverview);
 router.get('/:id/operating-settings', requireAuth, requireRestaurantOwnership, getOperatingSettings);
 router.put('/:id/operating-settings', requireAuth, requireRestaurantOwnership, validate({ body: operatingSettingsSchema }), updateOperatingSettings);
+router.post('/:id/verify-bank-details', requireAuth, requireRestaurantOwnership, payoutLimiter, validate({ body: restaurantBankDetailsSchema }), verifyRestaurantBank);
 router.post('/:id/bank-details', requireAuth, requireRestaurantOwnership, payoutLimiter, validate({ body: restaurantBankDetailsSchema }), submitBankDetails);
 router.delete('/:id', requireAuth, requireRestaurantOwnership, deleteRestaurant);
 router.get('/:id/menu-management', requireAuth, requireRestaurantOwnership, getRestaurantMenuManagement);
