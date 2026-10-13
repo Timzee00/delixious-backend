@@ -39,9 +39,18 @@ export async function listRestaurantTeam(req, res, next) {
         .eq('restaurant_id', restaurant.id).order('created_at', { ascending: false }).limit(100),
     ]);
     if (e1 || e2) throw e1 || e2;
+    const memberIds = (members || []).map((member) => member.user_id);
+    let enrichedMembers = members || [];
+    if (memberIds.length) {
+      const { data: profiles, error: profileError } = await supabaseAdmin.from('profiles')
+        .select('id,full_name').in('id', memberIds);
+      if (profileError) throw profileError;
+      const names = new Map((profiles || []).map((profile) => [profile.id, profile.full_name]));
+      enrichedMembers = members.map((member) => ({ ...member, full_name: names.get(member.user_id) || null }));
+    }
     // Never leak authentication secrets, invite tokens, or another owner's data.
     res.set('Cache-Control', 'private, no-store');
-    res.json({ members: members || [], invites: invites || [] });
+    res.json({ members: enrichedMembers, invites: invites || [] });
   } catch (err) { next(err); }
 }
 
