@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { supabaseAdmin } from '../config/supabase.js';
 import { restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
-import { initializeTransaction } from '../utils/paystack.js';
+import { initializeTransaction, getPaystackMode } from '../utils/paystack.js';
 
 const DELIVERY_FEE = 500;
 const COMMISSION_RATE = 0.10;
@@ -47,7 +47,7 @@ export async function checkout(req, res, next) {
 
       const { data: restaurant, error: restaurantError } = await supabaseAdmin
         .from('restaurants')
-        .select('id, name, is_open, approval_status, paystack_subaccount_code')
+        .select('id, name, is_open, approval_status, paystack_subaccount_code, payout_mode')
         .eq('id', cart.restaurant_id)
         .single();
       if (restaurantError || !restaurant) return res.status(404).json({ error: 'Restaurant not found.' });
@@ -57,6 +57,12 @@ export async function checkout(req, res, next) {
       }
       if (!restaurant.paystack_subaccount_code) {
         return res.status(409).json({ code: 'RESTAURANT_PAYOUT_SETUP_REQUIRED', error: `${restaurant.name} cannot accept online orders until its payout account is set up. Your cart has been preserved; please try another restaurant or check back later.` });
+      }
+      if (!getPaystackMode() || restaurant.payout_mode !== getPaystackMode()) {
+        return res.status(409).json({
+          code: 'RESTAURANT_PAYOUT_MODE_MISMATCH',
+          error: `${restaurant.name} needs to reconnect its payout account for the current payment environment. Your cart has been preserved.`,
+        });
       }
 
       const { data: hours, error: hoursError } = await supabaseAdmin
