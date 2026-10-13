@@ -134,6 +134,14 @@ export async function assignAgent(req, res, next) {
     if (agentProfile.rider_approval_status !== 'approved') {
       return res.status(400).json({ error: 'This rider is not yet approved to take deliveries.' });
     }
+    const { count: busyCount, error: busyError } = await supabaseAdmin.from('delivery_tracking')
+      .select('order_id', { count: 'exact', head: true })
+      .eq('delivery_agent_id', delivery_agent_id)
+      .in('status', ['assigned','picked_up','en_route']);
+    if (busyError) throw busyError;
+    if (busyCount > 0) {
+      return res.status(409).json({ code: 'RIDER_BUSY', error: 'This rider is already completing another delivery. Choose an available rider.' });
+    }
 
     // Conditional compare-and-set: do not overwrite a different rider's
     // claim or a previously assigned delivery, even during a race.
@@ -145,6 +153,9 @@ export async function assignAgent(req, res, next) {
       .is('delivery_agent_id', null)
       .select('id, order_id, delivery_agent_id, status, claimed_at')
       .maybeSingle();
+    if (error?.code === '23505') {
+      return res.status(409).json({ code: 'RIDER_BUSY', error: 'This rider was assigned another delivery just now.' });
+    }
     if (error) throw error;
     if (!data) return res.status(409).json({
       code: 'DELIVERY_ALREADY_ASSIGNED',
@@ -228,6 +239,9 @@ export async function claimDelivery(req, res, next) {
       .is('delivery_agent_id', null)
       .select()
       .maybeSingle();
+    if (error?.code === '23505') {
+      return res.status(409).json({ code: 'ACTIVE_DELIVERY_EXISTS', error: 'You already have an active delivery. Finish it before claiming another.' });
+    }
     if (error) throw error;
     if (!data) return res.status(409).json({ error: 'This delivery has already been claimed by someone else.' });
 
