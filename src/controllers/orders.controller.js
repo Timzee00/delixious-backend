@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { supabaseAdmin } from '../config/supabase.js';
+import { restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
 import { initializeTransaction } from '../utils/paystack.js';
 
 const DELIVERY_FEE = 500;
@@ -56,6 +57,18 @@ export async function checkout(req, res, next) {
       }
       if (!restaurant.paystack_subaccount_code) {
         return res.status(409).json({ code: 'RESTAURANT_PAYOUT_SETUP_REQUIRED', error: `${restaurant.name} cannot accept online orders until its payout account is set up. Your cart has been preserved; please try another restaurant or check back later.` });
+      }
+
+      const { data: hours, error: hoursError } = await supabaseAdmin
+        .from('restaurant_operating_settings')
+        .select('schedule_enabled, weekly_hours')
+        .eq('restaurant_id', restaurant.id).maybeSingle();
+      if (hoursError) throw hoursError;
+      if (hours?.schedule_enabled && !restaurantAcceptingBySchedule(hours.weekly_hours)) {
+        return res.status(409).json({
+          code: 'RESTAURANT_OUTSIDE_HOURS',
+          error: `${restaurant.name} is currently outside its scheduled business hours. Your cart is saved.`,
+        });
       }
 
       const subtotal = cartItems.reduce((sum, ci) => sum + Number(ci.menu_items.price) * ci.quantity, 0);
