@@ -14,7 +14,7 @@ export async function getMerchantOverview(req, res, next) {
   try {
     const restaurantId = req.restaurant.id;
     const countOrders = (decorate) => decorate(supabaseAdmin.from('orders')
-      .select('id', { count: 'exact', head: true }).eq('restaurant_id', restaurantId));
+      .select('id', { count: 'exact', head: true }).eq('restaurant_id', restaurantId).eq('payment_status', 'paid'));
     const tasks = [
       countOrders((q) => q.eq('status', 'pending')),
       countOrders((q) => q.eq('status', 'confirmed')),
