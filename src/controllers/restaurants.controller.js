@@ -1,13 +1,22 @@
 import { supabaseAdmin } from '../config/supabase.js';
-import { createSubaccount } from '../utils/paystack.js';
+import { createSubaccount, listBanks, resolveBankAccount } from '../utils/paystack.js';
 
 const PUBLIC_FIELDS = 'id, name, description, cuisine_type, address, lat, lng, logo_url, cover_image_url, is_open, rating_avg, rating_count, created_at';
 const MANAGEMENT_FIELDS = `${PUBLIC_FIELDS}, approval_status`;
+const PRIVATE_MANAGEMENT_FIELDS = `${MANAGEMENT_FIELDS}, bank_name, bank_account_name, bank_account_number, paystack_subaccount_code`;
 
 function safeRestaurant(data) {
   if (!data) return data;
   const { bank_name, bank_account_number, bank_account_name, paystack_subaccount_code, owner_id, ...safe } = data;
-  return safe;
+  return {
+    ...safe,
+    payout: {
+      ready: Boolean(paystack_subaccount_code),
+      bank_name: bank_name || null,
+      account_name: bank_account_name || null,
+      account_last4: bank_account_number ? bank_account_number.slice(-4) : null,
+    },
+  };
 }
 
 export async function listRestaurants(req, res, next) {
@@ -35,9 +44,9 @@ export async function getRestaurant(req, res, next) {
 
 export async function getMyRestaurants(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin.from('restaurants').select(MANAGEMENT_FIELDS).eq('owner_id', req.user.id).order('created_at', { ascending: false });
+    const { data, error } = await supabaseAdmin.from('restaurants').select(PRIVATE_MANAGEMENT_FIELDS).eq('owner_id', req.user.id).order('created_at', { ascending: false });
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ restaurants: data || [] });
+    res.json({ restaurants: (data || []).map(safeRestaurant) });
   } catch (err) { next(err); }
 }
 
@@ -45,7 +54,7 @@ export async function createRestaurant(req, res, next) {
   try {
     const { data, error } = await supabaseAdmin.from('restaurants').insert({ ...req.body, owner_id: req.user.id }).select(MANAGEMENT_FIELDS).single();
     if (error) return res.status(400).json({ error: error.message });
-    res.status(201).json({ message: 'Restaurant created.', restaurant: data });
+    res.status(201).json({ message: 'Restaurant created.', restaurant: safeRestaurant(data) });
   } catch (err) { next(err); }
 }
 
@@ -53,7 +62,7 @@ export async function updateRestaurant(req, res, next) {
   try {
     const { data, error } = await supabaseAdmin.from('restaurants').update(req.body).eq('id', req.restaurant.id).select(MANAGEMENT_FIELDS).single();
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ message: 'Restaurant updated.', restaurant: data });
+    res.json({ message: 'Restaurant updated.', restaurant: safeRestaurant({ ...req.restaurant, ...data }) });
   } catch (err) { next(err); }
 }
 
@@ -61,7 +70,7 @@ export async function toggleOpen(req, res, next) {
   try {
     const { data, error } = await supabaseAdmin.from('restaurants').update({ is_open: !req.restaurant.is_open }).eq('id', req.restaurant.id).select(MANAGEMENT_FIELDS).single();
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ message: `Restaurant is now ${data.is_open ? 'open' : 'closed'}.`, restaurant: data });
+    res.json({ message: `Restaurant is now ${data.is_open ? 'open' : 'closed'}.`, restaurant: safeRestaurant({ ...req.restaurant, ...data }) });
   } catch (err) { next(err); }
 }
 
@@ -73,16 +82,72 @@ export async function deleteRestaurant(req, res, next) {
   } catch (err) { next(err); }
 }
 
+export async function getPayoutBanks(req, res, next) {
+  try {
+    const result = await listBanks();
+    if (!result.status || !Array.isArray(result.data)) {
+      return res.status(502).json({ error: 'Bank directory temporarily unavailable.' });
+    }
+    const banks = result.data
+      .filter((bank) => bank.active !== false && bank.code && bank.name)
+      .map((bank) => ({ code: String(bank.code), name: String(bank.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.json({ banks });
+  } catch (err) {
+    if (err.response || err.code === 'ECONNABORTED') {
+      return res.status(502).json({ error: 'Could not load banks from the payment provider. Please try again.' });
+    }
+    next(err);
+  }
+}
+
 export async function submitBankDetails(req, res, next) {
   try {
-    const { bank_name, bank_code, account_number } = req.body;
-    const paystackResponse = await createSubaccount({ businessName: req.restaurant.name, bankCode: bank_code, accountNumber: account_number, percentageCharge: 10 });
-    if (!paystackResponse.status) return res.status(502).json({ error: 'Could not verify bank details with Paystack. Please check the details and try again.' });
-    const { data, error } = await supabaseAdmin.from('restaurants').update({ bank_name, bank_account_number: account_number, bank_account_name: paystackResponse.data.account_name, paystack_subaccount_code: paystackResponse.data.subaccount_code }).eq('id', req.restaurant.id).select(MANAGEMENT_FIELDS).single();
-    if (error) return res.status(400).json({ error: error.message });
-    res.json({ message: 'Payout account connected.', restaurant: data });
+    if (req.restaurant.paystack_subaccount_code) {
+      return res.status(409).json({
+        code: 'PAYOUT_ALREADY_CONNECTED',
+        error: 'A payout account is already connected. Contact support to change it securely.',
+      });
+    }
+    const { bank_code, account_number } = req.body;
+    const directory = await listBanks();
+    const selectedBank = directory.data?.find((bank) =>
+      String(bank.code) === bank_code && bank.active !== false
+    );
+    if (!directory.status || !selectedBank) {
+      return res.status(400).json({ error: 'Choose a supported bank from the list.' });
+    }
+
+    const verified = await resolveBankAccount({ bankCode: bank_code, accountNumber: account_number });
+    const accountName = verified.data?.account_name;
+    if (!verified.status || !accountName) {
+      return res.status(400).json({ error: 'Could not verify the account holder. Please check the bank and account number.' });
+    }
+    const result = await createSubaccount({
+      businessName: req.restaurant.name,
+      bankCode: bank_code,
+      accountNumber: account_number,
+      percentageCharge: 10,
+    });
+    if (!result.status || !result.data?.subaccount_code) {
+      return res.status(502).json({ error: 'Payment provider could not connect this bank account. Try again later.' });
+    }
+
+    const { data, error } = await supabaseAdmin.from('restaurants').update({
+      bank_name: selectedBank.name,
+      bank_account_number: account_number,
+      bank_account_name: accountName,
+      paystack_subaccount_code: result.data.subaccount_code,
+    }).eq('id', req.restaurant.id).is('paystack_subaccount_code', null)
+      .select(PRIVATE_MANAGEMENT_FIELDS).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(409).json({ error: 'Payout account was updated elsewhere. Refresh and try again.' });
+    res.json({ message: 'Payout account verified and connected.', restaurant: safeRestaurant(data) });
   } catch (err) {
-    if (err.response?.data?.message) return res.status(400).json({ error: err.response.data.message });
+    if (err.response?.data || err.code === 'ECONNABORTED') {
+      return res.status(400).json({ error: 'Bank verification or setup failed. Please confirm your bank details and try again.' });
+    }
     next(err);
   }
 }
