@@ -45,7 +45,7 @@ export async function listRestaurantsAdmin(req, res, next) {
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
     // Show payout readiness without exposing sensitive provider identifiers.
-    const restaurants = (data || []).map(({ paystack_subaccount_code, payout_mode, ...restaurant }) => ({ ...restaurant, payout_ready: Boolean(paystack_subaccount_code && payout_mode === getPaystackMode()) }));
+    const restaurants = (data || []).map(({ paystack_subaccount_code, payout_mode, ...restaurant }) => ({ ...restaurant, payout_ready: Boolean(getPaystackMode() && paystack_subaccount_code && payout_mode === getPaystackMode()) }));
     res.json({ restaurants, total: count, page, limit });
   } catch (err) {
     next(err);
