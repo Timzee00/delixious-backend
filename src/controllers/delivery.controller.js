@@ -8,7 +8,7 @@ const AGENT_TRANSITIONS = {
   delivered: [],
 };
 
-const CLAIMABLE_ORDER_STATUSES = ['confirmed', 'preparing', 'out_for_delivery'];
+const CLAIMABLE_ORDER_STATUSES = ['confirmed', 'preparing'];
 
 async function loadOrderWithRestaurant(orderId) {
   const { data, error } = await supabaseAdmin
