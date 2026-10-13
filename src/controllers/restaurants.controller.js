@@ -1,4 +1,5 @@
 import { supabaseAdmin } from '../config/supabase.js';
+import { restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
 import { createSubaccount, listBanks, resolveBankAccount } from '../utils/paystack.js';
 
 const PUBLIC_FIELDS = 'id, name, description, cuisine_type, address, lat, lng, logo_url, cover_image_url, is_open, rating_avg, rating_count, created_at';
@@ -19,6 +20,23 @@ function safeRestaurant(data) {
   };
 }
 
+async function withEffectiveAvailability(restaurants) {
+  if (!restaurants?.length) return [];
+  const ids = restaurants.map((r) => r.id);
+  const { data, error } = await supabaseAdmin.from('restaurant_operating_settings')
+    .select('restaurant_id, schedule_enabled, weekly_hours').in('restaurant_id', ids);
+  if (error) throw error;
+  const settingsByRestaurant = new Map((data || []).map((setting) => [setting.restaurant_id, setting]));
+  return restaurants.map((restaurant) => {
+    const settings = settingsByRestaurant.get(restaurant.id);
+    return {
+      ...restaurant,
+      accepting_orders: Boolean(restaurant.is_open)
+        && (!settings?.schedule_enabled || restaurantAcceptingBySchedule(settings.weekly_hours)),
+    };
+  });
+}
+
 export async function listRestaurants(req, res, next) {
   try {
     const { search, cuisine, is_open, page, limit } = req.query;
@@ -30,7 +48,7 @@ export async function listRestaurants(req, res, next) {
     if (is_open !== undefined) query = query.eq('is_open', is_open === 'true');
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ restaurants: data, total: count, page, limit });
+    res.json({ restaurants: await withEffectiveAvailability(data), total: count, page, limit });
   } catch (err) { next(err); }
 }
 
@@ -38,7 +56,7 @@ export async function getRestaurant(req, res, next) {
   try {
     const { data, error } = await supabaseAdmin.from('restaurants').select(PUBLIC_FIELDS).eq('id', req.params.id).eq('approval_status', 'approved').single();
     if (error || !data) return res.status(404).json({ error: 'Restaurant not found.' });
-    res.json({ restaurant: data });
+    res.json({ restaurant: (await withEffectiveAvailability([data]))[0] });
   } catch (err) { next(err); }
 }
 
