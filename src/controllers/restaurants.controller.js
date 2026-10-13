@@ -12,7 +12,7 @@ function safeRestaurant(data) {
   return {
     ...safe,
     payout: {
-      ready: Boolean(paystack_subaccount_code && payout_mode === getPaystackMode()),
+      ready: Boolean(getPaystackMode() && paystack_subaccount_code && payout_mode === getPaystackMode()),
       bank_name: bank_name || null,
       account_name: bank_account_name || null,
       account_last4: bank_account_number ? bank_account_number.slice(-4) : null,
