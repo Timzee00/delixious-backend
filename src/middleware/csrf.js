@@ -17,7 +17,13 @@ export function generateCsrfToken() {
 }
 
 export function csrfProtection(req, res, next) {
-  if (SAFE_METHODS.has(req.method) || EXEMPT_PATHS.has(req.path)) {
+  // Public job applications require no login cookies and are independently
+  // protected with body validation plus per-IP rate limiting. Keep CSRF
+  // validation active for requests that DO carry an authenticated session.
+  const publicJobApplication = req.method === 'POST'
+    && /^\/api\/careers\/jobs\/[0-9a-f-]{36}\/apply$/i.test(req.path)
+    && !req.cookies?.access_token;
+  if (SAFE_METHODS.has(req.method) || EXEMPT_PATHS.has(req.path) || publicJobApplication) {
     return next();
   }
 
