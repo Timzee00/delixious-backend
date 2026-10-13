@@ -1,4 +1,6 @@
 import { supabaseAdmin } from '../config/supabase.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 async function checkOwner(restaurantId, req) {
   let q = supabaseAdmin.from('restaurants').select('id,name,owner_id,approval_status,logo_url,cover_image_url,description,address')
@@ -68,16 +70,16 @@ export async function updateOwnerJob(req, res, next) {
 export async function submitJobApplication(req, res, next) {
   try {
     const { data: job, error: je } = await supabaseAdmin.from('restaurant_jobs')
-      .select('id,restaurant_id,published,restaurants!inner(approval_status,owner_id)')
+      .select('id,restaurant_id,published,restaurants!inner(approval_status,owner_id,name)')
       .eq('id', req.params.jobId).eq('published', true).eq('restaurants.approval_status','approved')
       .maybeSingle();
     if (je) throw je;
     if (!job) return res.status(404).json({ error: 'This vacancy is no longer accepting applications.' });
     const { applicant_name, applicant_email, applicant_phone, cover_note } = req.body;
-    const { error } = await supabaseAdmin.from('restaurant_job_applications').insert({
+    const { data: application, error } = await supabaseAdmin.from('restaurant_job_applications').insert({
       job_id: job.id, applicant_name, applicant_email: applicant_email.toLowerCase(),
       applicant_phone: applicant_phone || null, cover_note, privacy_consent_at: new Date().toISOString(),
-    });
+    }).select('id').single();
     if (error) throw error;
     // Inform the owner, but keep applicant contact details inside the
     // authenticated hiring workspace rather than a push notification.
@@ -87,6 +89,36 @@ export async function submitJobApplication(req, res, next) {
       title: 'New restaurant job application',
       body: 'A new application was received for one of your published vacancies. Open Hiring to review it.',
     });
+    // A notification email must never undo or duplicate a successful
+    // application. Do not email applicant contact details to the owner.
+    try {
+      const { data: owner } = await supabaseAdmin.auth.admin.getUserById(job.restaurants.owner_id);
+      if (owner?.user?.email) {
+        await queueTransactionalEmail({
+          eventType:'job_application_received',to:owner.user.email,
+          variables:{
+            name:'restaurant owner',restaurant:job.restaurants.name,jobTitle:'a published vacancy',
+            hiringUrl:`${process.env.FRONTEND_URL}/dashboard`,
+          },
+          dedupeKey:`job-application-owner:${application.id}`,
+        });
+      }
+      // Public application endpoints can be abused to send messages to a
+      // victim's mailbox. Do not enable applicant acknowledgements until
+      // CAPTCHA / abuse monitoring is operating in staging.
+      if (process.env.BREVO_APPLICANT_ACK_ENABLED === 'true') {
+        await queueTransactionalEmail({
+          eventType:'job_application_confirmation',to:applicant_email,name:applicant_name,
+          variables:{
+            name:applicant_name,restaurant:job.restaurants.name,jobTitle:'a published vacancy',
+            careersUrl:`${process.env.FRONTEND_URL}/restaurants/${job.restaurant_id}/careers`,
+          },
+          dedupeKey:`job-application-confirm:${application.id}`,
+        });
+      }
+    } catch (emailError) {
+      logger.warn('Application email enqueue failed', { applicationId:application.id, error:emailError.message });
+    }
     // Application submission must not expose applicant identity in a response.
     res.status(201).json({ message: 'Application received. The restaurant will contact shortlisted candidates.' });
   } catch (err) { next(err); }
