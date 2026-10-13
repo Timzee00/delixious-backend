@@ -2,10 +2,11 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { requireAuth } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
-import { staffInviteSchema, acceptStaffInviteSchema, staffUpdateSchema, staffOrderStatusSchema, staffListQuerySchema } from '../schemas/staff.schema.js';
+import { staffInviteSchema, acceptStaffInviteSchema, staffUpdateSchema, staffOrderStatusSchema, staffListQuerySchema, staffItemAvailabilitySchema } from '../schemas/staff.schema.js';
 import {
   listRestaurantTeam, createTeamInvite, acceptTeamInvite, updateTeamMember,
   listMyStaffMemberships, listStaffOrders, changeStaffOrderStatus,
+  listStaffMenu, updateStaffItemAvailability,
 } from '../controllers/staff.controller.js';
 
 const router = Router();
@@ -18,6 +19,8 @@ router.post('/accept', inviteLimit, requireAuth, validate({ body: acceptStaffInv
 router.get('/restaurants/:restaurantId/team', requireAuth, listRestaurantTeam);
 router.post('/restaurants/:restaurantId/invites', inviteLimit, requireAuth, validate({ body: staffInviteSchema }), createTeamInvite);
 router.patch('/restaurants/:restaurantId/members/:userId', requireAuth, validate({ body: staffUpdateSchema }), updateTeamMember);
+router.get('/restaurants/:restaurantId/menu', requireAuth, listStaffMenu);
+router.patch('/restaurants/:restaurantId/menu/:itemId/availability', requireAuth, validate({ body: staffItemAvailabilitySchema }), updateStaffItemAvailability);
 router.get('/restaurants/:restaurantId/orders', requireAuth, validate({ query: staffListQuerySchema }), listStaffOrders);
 router.patch('/orders/:orderId/status', requireAuth, validate({ body: staffOrderStatusSchema }), changeStaffOrderStatus);
 export default router;
