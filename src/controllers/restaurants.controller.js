@@ -3,6 +3,7 @@ import { getRestaurantAvailability } from '../utils/restaurantHours.js';
 import { createSubaccount, listBanks, resolveBankAccount, getPaystackMode } from '../utils/paystack.js';
 
 const PUBLIC_FIELDS = 'id, name, description, cuisine_type, address, lat, lng, logo_url, cover_image_url, is_open, rating_avg, rating_count, created_at';
+const PUBLIC_QUERY_FIELDS = `${PUBLIC_FIELDS}, paystack_subaccount_code, payout_mode`;
 const MANAGEMENT_FIELDS = `${PUBLIC_FIELDS}, approval_status`;
 const PRIVATE_MANAGEMENT_FIELDS = `${MANAGEMENT_FIELDS}, bank_name, bank_account_name, bank_account_number, paystack_subaccount_code, payout_mode`;
 
@@ -29,9 +30,17 @@ async function withEffectiveAvailability(restaurants) {
   const settingsByRestaurant = new Map((data || []).map((setting) => [setting.restaurant_id, setting]));
   return restaurants.map((restaurant) => {
     const settings = settingsByRestaurant.get(restaurant.id);
+    const { paystack_subaccount_code, payout_mode, ...publicRestaurant } = restaurant;
+    const available = getRestaurantAvailability(restaurant, settings);
+    const currentMode = getPaystackMode();
+    const paymentsReady = Boolean(currentMode && paystack_subaccount_code && payout_mode === currentMode);
     return {
-      ...restaurant,
-      ...getRestaurantAvailability(restaurant, settings),
+      ...publicRestaurant,
+      ...available,
+      checkout_ready: available.accepting_orders && paymentsReady,
+      checkout_unavailable_reason: available.accepting_orders && !paymentsReady
+        ? 'payments_not_ready'
+        : available.availability_reason,
       estimated_prep_minutes: settings?.prep_time_minutes ?? 30,
     };
   });
@@ -42,7 +51,7 @@ export async function listRestaurants(req, res, next) {
     const { search, cuisine, is_open, page, limit } = req.query;
     const from = (page - 1) * limit;
     const to = from + limit - 1;
-    let query = supabaseAdmin.from('restaurants').select(PUBLIC_FIELDS, { count: 'exact' }).eq('approval_status', 'approved').order('rating_avg', { ascending: false }).range(from, to);
+    let query = supabaseAdmin.from('restaurants').select(PUBLIC_QUERY_FIELDS, { count: 'exact' }).eq('approval_status', 'approved').order('rating_avg', { ascending: false }).range(from, to);
     if (search) query = query.ilike('name', `%${search}%`);
     if (cuisine) query = query.ilike('cuisine_type', `%${cuisine}%`);
     if (is_open !== undefined) query = query.eq('is_open', is_open === 'true');
@@ -54,7 +63,7 @@ export async function listRestaurants(req, res, next) {
 
 export async function getRestaurant(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin.from('restaurants').select(PUBLIC_FIELDS).eq('id', req.params.id).eq('approval_status', 'approved').single();
+    const { data, error } = await supabaseAdmin.from('restaurants').select(PUBLIC_QUERY_FIELDS).eq('id', req.params.id).eq('approval_status', 'approved').single();
     if (error || !data) return res.status(404).json({ error: 'Restaurant not found.' });
     res.json({ restaurant: (await withEffectiveAvailability([data]))[0] });
   } catch (err) { next(err); }
