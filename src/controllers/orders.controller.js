@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { supabaseAdmin } from '../config/supabase.js';
 import { getRestaurantAvailability } from '../utils/restaurantHours.js';
 import { initializeTransaction, getPaystackMode } from '../utils/paystack.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 const DELIVERY_FEE = 500;
 const COMMISSION_RATE = 0.10;
@@ -275,6 +277,18 @@ export async function updateOrderStatus(req, res, next) {
     const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status }).eq('id', order.id).eq('status', order.status).select().single();
     if (updateError) throw updateError;
     await supabaseAdmin.from('notifications').insert({ user_id: order.user_id, title: 'Order update', body: `Your order is now "${status.replace(/_/g, ' ')}".`, type: 'order_update' });
+    if (status === 'confirmed') {
+      try {
+        const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
+        if (customer?.user?.email) await queueTransactionalEmail({
+          eventType:'order_accepted',to:customer.user.email,
+          variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+          dedupeKey:`order-accepted:${order.id}`,
+        });
+      } catch (mailError) {
+        logger.warn('Order acceptance email enqueue failed', { orderId:order.id, error:mailError.message });
+      }
+    }
     res.json({ message: 'Order status updated.', order: updated });
   } catch (err) {
     next(err);
