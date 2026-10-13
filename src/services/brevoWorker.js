@@ -7,7 +7,19 @@ import logger from '../utils/logger.js';
 const http = axios.create({ baseURL: 'https://api.brevo.com/v3', timeout: 12000 });
 const MAX_ATTEMPTS = 7;
 
+export function brevoRecipientAllowed(email) {
+  if (process.env.BREVO_SEND_SCOPE === 'all') return true;
+  const allowed = new Set((process.env.BREVO_ALLOWED_RECIPIENTS || '')
+    .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
+  return allowed.has(String(email).toLowerCase());
+}
+
 async function sendBrevo(row) {
+  if (!brevoRecipientAllowed(row.recipient_email)) {
+    const blocked = new Error('Recipient is not on the configured Brevo test allowlist.');
+    blocked.permanent = true;
+    throw blocked;
+  }
   const { eventType, variables } = decryptEmailPayload(row.payload_ciphertext);
   if (eventType !== row.event_type) throw new Error('Email event integrity mismatch.');
   const content = renderTransactionalEmail(eventType, variables);
@@ -53,8 +65,8 @@ async function dispatch(row) {
         last_error: message,
       });
     } else {
-      await finish(row, status && status >= 400 && status < 500 ? 'failed' : 'uncertain', {
-        last_error: status ? message : 'Unknown send outcome; reconcile via Brevo message logs before any retry.',
+      await finish(row, err.permanent || (status && status >= 400 && status < 500) ? 'failed' : 'uncertain', {
+        last_error: err.permanent ? 'Recipient blocked by configured staging allowlist.' : status ? message : 'Unknown send outcome; reconcile via Brevo message logs before any retry.',
       });
       logger.warn('Transactional email needs review', { outboxId:row.id, providerStatus:status ?? null });
     }
