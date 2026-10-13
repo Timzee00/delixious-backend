@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import { supabaseAdmin } from '../config/supabase.js';
 import { verifyTransaction, listBanks } from '../utils/paystack.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 async function handleSuccessfulPayment(data) {
   const reference = data.reference;
@@ -59,6 +61,25 @@ async function handleSuccessfulPayment(data) {
           body: `You have a new paid order (#${order.id.slice(0, 8)}).`,
           type: 'order_update',
         });
+      }
+      try {
+        const front = process.env.FRONTEND_URL || '';
+        const [{ data: buyer }, { data: owner }] = await Promise.all([
+          supabaseAdmin.auth.admin.getUserById(order.user_id),
+          restaurant ? supabaseAdmin.auth.admin.getUserById(restaurant.owner_id) : Promise.resolve({data:null}),
+        ]);
+        if (buyer?.user?.email) await queueTransactionalEmail({
+          eventType:'order_paid',to:buyer.user.email,
+          variables:{ name:'customer',orderId:order.id,orderUrl:`${front}/orders/${order.id}` },
+          dedupeKey:`order-paid:${order.id}`,
+        });
+        if (owner?.user?.email) await queueTransactionalEmail({
+          eventType:'restaurant_order_received',to:owner.user.email,
+          variables:{ restaurant:restaurant.name,orderId:order.id,dashboardUrl:`${front}/dashboard` },
+          dedupeKey:`restaurant-order-paid:${order.id}`,
+        });
+      } catch (mailError) {
+        logger.warn('Paid order email enqueue failed', { orderId:order.id, error:mailError.message });
       }
     }
 
