@@ -73,17 +73,45 @@ async function handleSuccessfulPayment(data) {
   }
 }
 
+async function reconcileRiderTransfer(eventType, transfer) {
+  const reference = transfer?.reference;
+  if (typeof reference !== 'string' || !/^rider_payout_[0-9a-f-]{36}$/i.test(reference)) return;
+  const orderId = reference.slice('rider_payout_'.length);
+  const { data: order, error } = await supabaseAdmin.from('orders')
+    .select('id,status,payment_status,rider_payout_amount,rider_payout_status,rider_payout_reference')
+    .eq('id', orderId).eq('rider_payout_reference', reference).maybeSingle();
+  if (error) throw error;
+  // Do not trust a transfer reference alone. Check current state, delivery,
+  // and amount; reject any webhook that does not match our expected transfer.
+  if (!order || order.rider_payout_status !== 'processing'
+    || order.status !== 'delivered' || order.payment_status !== 'paid') return;
+  if (!Number.isFinite(Number(transfer.amount))
+    || Math.round(Number(order.rider_payout_amount) * 100) !== Number(transfer.amount)) return;
+  const payoutStatus = eventType === 'transfer.success' ? 'paid' : 'failed';
+  const { error: writeError } = await supabaseAdmin.from('orders')
+    .update({ rider_payout_status: payoutStatus })
+    .eq('id', order.id).eq('rider_payout_status', 'processing')
+    .eq('rider_payout_reference', reference);
+  if (writeError) throw writeError;
+}
+
 export async function paystackWebhook(req, res, next) {
   try {
+    const secret = process.env.PAYSTACK_SECRET_KEY;
     const signature = req.headers['x-paystack-signature'];
-    const expectedSignature = crypto
-      .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-      .update(req.rawBody || Buffer.from(JSON.stringify(req.body)))
-      .digest('hex');
-
-    if (!signature || signature !== expectedSignature) return res.status(401).json({ error: 'Invalid signature.' });
+    if (!secret || typeof signature !== 'string' || !/^[a-f0-9]{128}$/i.test(signature)) {
+      return res.status(401).json({ error: 'Invalid signature.' });
+    }
+    const expectedSignature = crypto.createHmac('sha512', secret)
+      .update(req.rawBody || Buffer.from(JSON.stringify(req.body))).digest();
+    if (!crypto.timingSafeEqual(Buffer.from(signature, 'hex'), expectedSignature)) {
+      return res.status(401).json({ error: 'Invalid signature.' });
+    }
 
     if (req.body.event === 'charge.success') await handleSuccessfulPayment(req.body.data);
+    if (req.body.event === 'transfer.success' || req.body.event === 'transfer.failed' || req.body.event === 'transfer.reversed') {
+      await reconcileRiderTransfer(req.body.event, req.body.data);
+    }
     res.sendStatus(200);
   } catch (err) {
     next(err);
