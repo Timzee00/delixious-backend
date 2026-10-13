@@ -2,6 +2,13 @@ import axios from 'axios';
 
 const PAYSTACK_BASE_URL = 'https://api.paystack.co';
 
+export function getPaystackMode() {
+  const key = process.env.PAYSTACK_SECRET_KEY || '';
+  if (key.startsWith('sk_test_')) return 'test';
+  if (key.startsWith('sk_live_')) return 'live';
+  return null;
+}
+
 function client() {
   if (!process.env.PAYSTACK_SECRET_KEY) {
     throw new Error('PAYSTACK_SECRET_KEY is not set in the environment.');
