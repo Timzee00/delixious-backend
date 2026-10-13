@@ -140,12 +140,20 @@ export async function assignAgent(req, res, next) {
       error: 'Another rider has already claimed or been assigned this delivery. Refresh to see its current status.',
     });
 
-    await supabaseAdmin.from('notifications').insert({
-      user_id: order.user_id,
-      title: 'Delivery agent assigned',
-      body: `${agentProfile.full_name} will be delivering your order.`,
-      type: 'order_update',
-    });
+    await supabaseAdmin.from('notifications').insert([
+      {
+        user_id: order.user_id,
+        title: 'Delivery agent assigned',
+        body: `${agentProfile.full_name} will be delivering your order.`,
+        type: 'order_update',
+      },
+      {
+        user_id: delivery_agent_id,
+        title: 'New delivery assigned',
+        body: `You were assigned a delivery from order #${order.id.slice(0, 8)}. Open My Deliveries for the pickup details.`,
+        type: 'order_update',
+      },
+    ]);
     res.json({ message: 'Delivery agent assigned.', delivery_tracking: data });
   } catch (err) {
     next(err);
@@ -212,12 +220,20 @@ export async function claimDelivery(req, res, next) {
     if (error) throw error;
     if (!data) return res.status(409).json({ error: 'This delivery has already been claimed by someone else.' });
 
-    await supabaseAdmin.from('notifications').insert({
-      user_id: order.user_id,
-      title: 'Delivery agent assigned',
-      body: `${req.profile.full_name} will be delivering your order.`,
-      type: 'order_update',
-    });
+    await supabaseAdmin.from('notifications').insert([
+      {
+        user_id: order.user_id,
+        title: 'Delivery agent assigned',
+        body: `${req.profile.full_name} will be delivering your order.`,
+        type: 'order_update',
+      },
+      {
+        user_id: order.restaurants.owner_id,
+        title: 'Rider claimed your order',
+        body: `${req.profile.full_name} has claimed delivery for order #${order.id.slice(0, 8)}.`,
+        type: 'order_update',
+      },
+    ]);
     res.json({ message: 'Delivery claimed.', delivery_tracking: data });
   } catch (err) {
     next(err);
