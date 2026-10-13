@@ -29,7 +29,9 @@ async function handleSuccessfulPayment(data) {
   try {
     const { data: orders, error: ordersError } = await supabaseAdmin
       .from('orders')
-      .update({ payment_status: 'paid', status: 'confirmed' })
+      // Paying is not the same as kitchen acceptance. Keep status pending
+      // until the restaurant owner/counter explicitly confirms the order.
+      .update({ payment_status: 'paid' })
       .eq('checkout_group_id', claimedPayment.checkout_group_id)
       .eq('payment_status', 'pending')
       .select();
