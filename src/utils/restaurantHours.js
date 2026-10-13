@@ -34,3 +34,18 @@ export function restaurantAcceptingBySchedule(weeklyHours, now = new Date()) {
     && minute < minutes(yesterday.closes);
   return Boolean(currentInterval || overnightFromYesterday);
 }
+
+/**
+ * One decision for public listings and payment checkout. Temporary pauses end
+ * automatically without background cron jobs; a manual closure never auto-opens.
+ */
+export function getRestaurantAvailability(restaurant, settings, now = new Date()) {
+  if (!restaurant?.is_open) return { accepting_orders: false, availability_reason: 'manually_closed' };
+  if (settings?.paused_until && new Date(settings.paused_until).getTime() > now.getTime()) {
+    return { accepting_orders: false, availability_reason: 'temporarily_paused' };
+  }
+  if (settings?.schedule_enabled && !restaurantAcceptingBySchedule(settings.weekly_hours, now)) {
+    return { accepting_orders: false, availability_reason: 'outside_hours' };
+  }
+  return { accepting_orders: true, availability_reason: null };
+}
