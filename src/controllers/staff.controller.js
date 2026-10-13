@@ -186,3 +186,36 @@ export async function changeStaffOrderStatus(req, res, next) {
     res.json({ order: data });
   } catch (err) { next(err); }
 }
+
+export async function listStaffMenu(req, res, next) {
+  try {
+    const access = await authorizeStaff(req.params.restaurantId, req);
+    if (!access) return res.status(403).json({ error: 'You do not have access to this restaurant.' });
+    if (!['owner','manager','kitchen'].includes(access.staff_role)) {
+      return res.status(403).json({ error: 'Your role cannot manage menu availability.' });
+    }
+    const { data, error } = await supabaseAdmin.from('menu_items')
+      .select('id,name,category,is_available')
+      .eq('restaurant_id', access.restaurant.id)
+      .order('name', { ascending: true }).limit(100);
+    if (error) throw error;
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ menu_items: data || [], staff_role: access.staff_role });
+  } catch (err) { next(err); }
+}
+
+export async function updateStaffItemAvailability(req, res, next) {
+  try {
+    const access = await authorizeStaff(req.params.restaurantId, req);
+    if (!access || !['owner','manager','kitchen'].includes(access.staff_role)) {
+      return res.status(403).json({ error: 'Your role cannot change menu item availability.' });
+    }
+    const { data, error } = await supabaseAdmin.from('menu_items')
+      .update({ is_available: req.body.is_available })
+      .eq('id', req.params.itemId).eq('restaurant_id', access.restaurant.id)
+      .select('id,name,is_available').maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Menu item not found in your restaurant.' });
+    res.json({ menu_item: data });
+  } catch (err) { next(err); }
+}
