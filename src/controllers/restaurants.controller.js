@@ -1,5 +1,5 @@
 import { supabaseAdmin } from '../config/supabase.js';
-import { restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
+import { getRestaurantAvailability } from '../utils/restaurantHours.js';
 import { createSubaccount, listBanks, resolveBankAccount, getPaystackMode } from '../utils/paystack.js';
 
 const PUBLIC_FIELDS = 'id, name, description, cuisine_type, address, lat, lng, logo_url, cover_image_url, is_open, rating_avg, rating_count, created_at';
@@ -24,15 +24,15 @@ async function withEffectiveAvailability(restaurants) {
   if (!restaurants?.length) return [];
   const ids = restaurants.map((r) => r.id);
   const { data, error } = await supabaseAdmin.from('restaurant_operating_settings')
-    .select('restaurant_id, schedule_enabled, weekly_hours').in('restaurant_id', ids);
+    .select('restaurant_id, schedule_enabled, weekly_hours, paused_until, prep_time_minutes').in('restaurant_id', ids);
   if (error) throw error;
   const settingsByRestaurant = new Map((data || []).map((setting) => [setting.restaurant_id, setting]));
   return restaurants.map((restaurant) => {
     const settings = settingsByRestaurant.get(restaurant.id);
     return {
       ...restaurant,
-      accepting_orders: Boolean(restaurant.is_open)
-        && (!settings?.schedule_enabled || restaurantAcceptingBySchedule(settings.weekly_hours)),
+      ...getRestaurantAvailability(restaurant, settings),
+      estimated_prep_minutes: settings?.prep_time_minutes ?? 30,
     };
   });
 }
