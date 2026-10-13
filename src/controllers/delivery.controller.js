@@ -124,12 +124,21 @@ export async function assignAgent(req, res, next) {
       return res.status(400).json({ error: 'This rider is not yet approved to take deliveries.' });
     }
 
+    // Conditional compare-and-set: do not overwrite a different rider's
+    // claim or a previously assigned delivery, even during a race.
     const { data, error } = await supabaseAdmin
       .from('delivery_tracking')
-      .upsert({ order_id: order.id, delivery_agent_id, status: 'assigned' }, { onConflict: 'order_id' })
-      .select()
-      .single();
+      .update({ delivery_agent_id, status: 'assigned', claimed_at: new Date().toISOString() })
+      .eq('order_id', order.id)
+      .eq('status', 'pending')
+      .is('delivery_agent_id', null)
+      .select('id, order_id, delivery_agent_id, status, claimed_at')
+      .maybeSingle();
     if (error) throw error;
+    if (!data) return res.status(409).json({
+      code: 'DELIVERY_ALREADY_ASSIGNED',
+      error: 'Another rider has already claimed or been assigned this delivery. Refresh to see its current status.',
+    });
 
     await supabaseAdmin.from('notifications').insert({
       user_id: order.user_id,
@@ -145,21 +154,29 @@ export async function assignAgent(req, res, next) {
 
 export async function listAvailableDeliveries(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin
+    if (req.profile.rider_approval_status !== 'approved') {
+      return res.status(403).json({ error: 'Your rider account must be approved before seeing available deliveries.' });
+    }
+    const page = Number(req.query.page || 1);
+    const limit = Number(req.query.limit || 12);
+    // Only paid, restaurant-confirmed orders are dispatched. Use an inner
+    // join so PostgREST filters ineligible orders BEFORE page/range applies.
+    const from = (page - 1) * limit;
+    const { data, error, count } = await supabaseAdmin
       .from('delivery_tracking')
-      .select('*, orders(id, delivery_address, total_amount, status, payment_status, restaurants(name, address))')
+      .select('order_id, status, updated_at, orders!inner(id, status, payment_status, rider_payout_amount, restaurants(name, address))', { count: 'exact' })
       .eq('status', 'pending')
       .is('delivery_agent_id', null)
-      .order('updated_at', { ascending: true });
+      .eq('orders.payment_status', 'paid')
+      .in('orders.status', CLAIMABLE_ORDER_STATUSES)
+      .order('updated_at', { ascending: true })
+      .range(from, from + limit - 1);
     if (error) throw error;
-
-    const deliveries = (data || []).filter((d) =>
-      d.orders?.payment_status === 'paid' && CLAIMABLE_ORDER_STATUSES.includes(d.orders?.status)
-    );
-    res.json({ deliveries });
-  } catch (err) {
-    next(err);
-  }
+    // Protect customers' exact address and total spend until a rider is
+    // assigned. A claim reveals delivery details only to that rider.
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ deliveries: data || [], total: count ?? 0, page, limit });
+  } catch (err) { next(err); }
 }
 
 export async function claimDelivery(req, res, next) {
@@ -172,6 +189,16 @@ export async function claimDelivery(req, res, next) {
     if (!order) return res.status(404).json({ error: 'Order not found.' });
     if (order.payment_status !== 'paid' || !CLAIMABLE_ORDER_STATUSES.includes(order.status)) {
       return res.status(400).json({ error: 'This order is not eligible for delivery pickup yet.' });
+    }
+
+    // Avoid a rider claiming a second job while an earlier one is in progress.
+    const { count: activeCount, error: activeError } = await supabaseAdmin.from('delivery_tracking')
+      .select('order_id', { count: 'exact', head: true })
+      .eq('delivery_agent_id', req.user.id)
+      .in('status', ['assigned', 'picked_up', 'en_route']);
+    if (activeError) throw activeError;
+    if (activeCount > 0) {
+      return res.status(409).json({ code: 'ACTIVE_DELIVERY_EXISTS', error: 'Complete your active delivery before claiming another.' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -223,6 +250,15 @@ export async function updateDeliveryStatus(req, res, next) {
     }
     const allowedNext = AGENT_TRANSITIONS[tracking.status] || [];
     if (!allowedNext.includes(status)) return res.status(400).json({ error: `Cannot move delivery from "${tracking.status}" to "${status}".` });
+    // Prevent pickup while the restaurant has not prepared the food.
+    if (status === 'picked_up') {
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from('orders').select('status, payment_status').eq('id', req.params.orderId).single();
+      if (orderError) throw orderError;
+      if (order.payment_status !== 'paid' || order.status !== 'preparing') {
+        return res.status(409).json({ error: 'The restaurant must be preparing the paid order before pickup can be confirmed.' });
+      }
+    }
 
     const { data: updated, error: updateError } = await supabaseAdmin.from('delivery_tracking').update({ status }).eq('order_id', req.params.orderId).eq('status', tracking.status).select().single();
     if (updateError) throw updateError;
