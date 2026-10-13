@@ -286,15 +286,16 @@ export async function cancelOrder(req, res, next) {
     const { data: order, error } = await supabaseAdmin.from('orders').select('*').eq('id', req.params.id).single();
     if (error || !order) return res.status(404).json({ error: 'Order not found.' });
     if (order.user_id !== req.user.id) return res.status(403).json({ error: 'You can only cancel your own orders.' });
-    if (order.payment_status === 'paid') {
+    if (order.payment_status !== 'failed') {
       return res.status(409).json({
-        code: 'PAID_ORDER_REQUIRES_REFUND',
-        error: 'This order is already paid. Contact Delixious support to request cancellation and a refund; your payment will not be silently forfeited.',
+        code: 'PAYMENT_CANCELLATION_REVIEW_REQUIRED',
+        error: 'This order has a payment pending, completed, or already refunded. Contact Delixious support to request cancellation; financial adjustments require verification.',
       });
     }
     if (!['pending', 'confirmed'].includes(order.status)) return res.status(400).json({ error: `Order can no longer be cancelled (status: ${order.status}).` });
-    const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status: 'cancelled' }).eq('id', order.id).eq('status', order.status).select().single();
+    const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status: 'cancelled' }).eq('id', order.id).eq('status', order.status).eq('payment_status', 'failed').select().maybeSingle();
     if (updateError) throw updateError;
+    if (!updated) return res.status(409).json({ error: 'Payment or order status changed. Refresh and try again.' });
     res.json({ message: 'Order cancelled.', order: updated });
   } catch (err) {
     next(err);
