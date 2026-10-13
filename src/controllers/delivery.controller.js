@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import { initiateTransfer } from '../utils/paystack.js';
+import { deliveryCode, verifyDeliveryCode } from '../utils/deliveryProof.js';
 
 const AGENT_TRANSITIONS = {
   assigned: ['picked_up'],
@@ -256,6 +257,30 @@ export async function updateLocation(req, res, next) {
   }
 }
 
+export async function getDeliveryProofCode(req, res, next) {
+  try {
+    const { data: order, error } = await supabaseAdmin.from('orders')
+      .select('id,user_id,payment_status,status').eq('id', req.params.orderId).maybeSingle();
+    if (error) throw error;
+    if (!order || order.user_id !== req.user.id) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+    if (order.payment_status !== 'paid' || ['cancelled','delivered'].includes(order.status)) {
+      return res.status(409).json({ error: 'Handoff code not available for this order.' });
+    }
+    const { data: tracking, error: trackingError } = await supabaseAdmin.from('delivery_tracking')
+      .select('status,delivery_agent_id').eq('order_id', order.id).maybeSingle();
+    if (trackingError) throw trackingError;
+    if (!tracking?.delivery_agent_id || !['assigned','picked_up','en_route'].includes(tracking.status)) {
+      return res.status(409).json({ error: 'Handoff code becomes available after a rider is assigned.' });
+    }
+    const code = deliveryCode(order.id, order.user_id);
+    if (!code) return res.status(503).json({ error: 'Delivery handoff verification is not configured yet.' });
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ code, instruction: 'Share this code only after the rider arrives with your order.' });
+  } catch (err) { next(err); }
+}
+
 export async function updateDeliveryStatus(req, res, next) {
   try {
     const { status } = req.body;
@@ -266,6 +291,28 @@ export async function updateDeliveryStatus(req, res, next) {
     }
     const allowedNext = AGENT_TRANSITIONS[tracking.status] || [];
     if (!allowedNext.includes(status)) return res.status(400).json({ error: `Cannot move delivery from "${tracking.status}" to "${status}".` });
+    if (status === 'delivered') {
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from('orders').select('id,user_id,payment_status').eq('id', req.params.orderId).single();
+      if (orderError) throw orderError;
+      if (order.payment_status !== 'paid') return res.status(409).json({ error: 'Payment has not been confirmed.' });
+      const expected = deliveryCode(order.id, order.user_id);
+      if (!expected) return res.status(503).json({ error: 'Delivery proof verification is not configured.' });
+      if ((tracking.proof_attempts || 0) >= 5) {
+        return res.status(423).json({ error: 'Too many incorrect codes. Contact Delixious support to verify delivery.' });
+      }
+      if (!verifyDeliveryCode(req.body.proof_code, expected)) {
+        const attempts = Number(tracking.proof_attempts || 0);
+        const { data: incremented, error: incrementError } = await supabaseAdmin.from('delivery_tracking')
+          .update({ proof_attempts: attempts + 1 })
+          .eq('order_id', req.params.orderId).eq('proof_attempts', attempts)
+          .eq('status', tracking.status).select('id').maybeSingle();
+        if (incrementError) throw incrementError;
+        return res.status(incremented ? 403 : 409).json({
+          error: incremented ? 'Incorrect six-digit delivery code. Ask the customer to confirm it.' : 'Delivery changed; refresh and try again.',
+        });
+      }
+    }
     // Prevent pickup while the restaurant has not prepared the food.
     if (status === 'picked_up') {
       const { data: order, error: orderError } = await supabaseAdmin
@@ -276,8 +323,11 @@ export async function updateDeliveryStatus(req, res, next) {
       }
     }
 
-    const { data: updated, error: updateError } = await supabaseAdmin.from('delivery_tracking').update({ status }).eq('order_id', req.params.orderId).eq('status', tracking.status).select().single();
+    const { data: updated, error: updateError } = await supabaseAdmin.from('delivery_tracking')
+      .update(status === 'delivered' ? { status, proof_verified_at: new Date().toISOString() } : { status })
+      .eq('order_id', req.params.orderId).eq('status', tracking.status).select().maybeSingle();
     if (updateError) throw updateError;
+    if (!updated) return res.status(409).json({ error: 'Delivery status was already updated. Refresh your active jobs.' });
 
     const orderStatusMap = { picked_up: 'out_for_delivery', en_route: 'out_for_delivery', delivered: 'delivered' };
     if (orderStatusMap[status]) {
