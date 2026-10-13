@@ -154,7 +154,8 @@ export async function submitBankDetails(req, res, next) {
 
     const { data, error } = await supabaseAdmin.from('restaurants').update({
       bank_name: selectedBank.name,
-      bank_account_number: account_number,
+      // Retain only the final four digits; Paystack keeps the settlement details.
+      bank_account_number: account_number.slice(-4),
       bank_account_name: accountName,
       paystack_subaccount_code: result.data.subaccount_code,
     }).eq('id', req.restaurant.id).is('paystack_subaccount_code', null)
