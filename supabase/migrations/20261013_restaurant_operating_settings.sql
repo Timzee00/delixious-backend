@@ -3,6 +3,8 @@
 CREATE TABLE IF NOT EXISTS public.restaurant_operating_settings (
   restaurant_id uuid PRIMARY KEY REFERENCES public.restaurants(id) ON DELETE CASCADE,
   schedule_enabled boolean NOT NULL DEFAULT false,
+  prep_time_minutes smallint NOT NULL DEFAULT 30 CHECK (prep_time_minutes BETWEEN 10 AND 180),
+  paused_until timestamptz,
   weekly_hours jsonb NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT weekly_hours_is_array CHECK (jsonb_typeof(weekly_hours) = 'array'),
