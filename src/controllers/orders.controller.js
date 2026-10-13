@@ -256,6 +256,12 @@ export async function getOrder(req, res, next) {
 export async function updateOrderStatus(req, res, next) {
   try {
     const { status } = req.body;
+    if (status === 'out_for_delivery' || status === 'delivered') {
+      return res.status(409).json({
+        code: 'RIDER_CONTROLS_DELIVERY',
+        error: 'The assigned rider updates pickup, en-route and delivery completion. Restaurant staff should prepare the order and hand it to the rider.',
+      });
+    }
     const { data: order, error } = await supabaseAdmin.from('orders').select('*, restaurants(owner_id)').eq('id', req.params.id).single();
     if (error || !order) return res.status(404).json({ error: 'Order not found.' });
     const isRestaurantOwner = order.restaurants.owner_id === req.user.id;
