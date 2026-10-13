@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderTransactionalEmail } from '../services/emailTemplates.js';
 import { encryptEmailPayload, decryptEmailPayload, emailConfigured } from '../services/emailOutbox.js';
+import { brevoRecipientAllowed } from '../services/brevoWorker.js';
 
 const prior = {
   EMAIL_ENCRYPTION_KEY:process.env.EMAIL_ENCRYPTION_KEY,
   BREVO_ENABLED:process.env.BREVO_ENABLED,
   BREVO_API_KEY:process.env.BREVO_API_KEY,
   BREVO_SENDER_EMAIL:process.env.BREVO_SENDER_EMAIL,
+  BREVO_SEND_SCOPE:process.env.BREVO_SEND_SCOPE,
+  BREVO_ALLOWED_RECIPIENTS:process.env.BREVO_ALLOWED_RECIPIENTS,
 };
 afterEach(() => {
   for (const [name,value] of Object.entries(prior)) {
@@ -30,6 +33,14 @@ describe('encrypted transactional email outbox', () => {
     const segments = encoded.split('.');
     segments[1] = Buffer.alloc(16, 1).toString('base64');
     expect(() => decryptEmailPayload(segments.join('.'))).toThrow();
+  });
+  it('never emails a staging recipient outside a narrow allowlist', () => {
+    process.env.BREVO_SEND_SCOPE = 'allowlist';
+    process.env.BREVO_ALLOWED_RECIPIENTS = 'staff-test@example.com, owner-test@example.com';
+    expect(brevoRecipientAllowed('staff-test@example.com')).toBe(true);
+    expect(brevoRecipientAllowed('nobody@example.com')).toBe(false);
+    delete process.env.BREVO_SEND_SCOPE;
+    expect(brevoRecipientAllowed('nobody@example.com')).toBe(false);
   });
   it('does not enable provider without complete configuration', () => {
     delete process.env.BREVO_ENABLED;
