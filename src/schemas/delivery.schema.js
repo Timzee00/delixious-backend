@@ -11,7 +11,7 @@ export const updateLocationSchema = z.object({
 
 export const updateDeliveryStatusSchema = z.object({
   status: z.enum(['picked_up', 'en_route', 'delivered']),
-  proof_code: z.string().regex(/^\\d{6}$/, 'Enter the six-digit code from the customer.').optional(),
+  proof_code: z.string().regex(/^[0-9]{6}$/, 'Enter the six-digit code from the customer.').optional(),
 }).strict().superRefine((body, ctx) => {
   if (body.status === 'delivered' && !body.proof_code) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['proof_code'], message: 'A delivery code is required to finish the order.' });
