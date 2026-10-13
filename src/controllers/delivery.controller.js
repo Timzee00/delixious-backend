@@ -57,6 +57,12 @@ async function payoutRider(order) {
   }
 
   const reference = `rider_payout_${order.id}`;
+  // Persist reference before the provider request. Fast Paystack webhooks may
+  // arrive before the initiating HTTP call returns.
+  const { error: referenceError } = await supabaseAdmin.from('orders')
+    .update({ rider_payout_reference: reference })
+    .eq('id', order.id).eq('rider_payout_status', 'processing');
+  if (referenceError) throw referenceError;
 
   try {
     const transfer = await initiateTransfer({
