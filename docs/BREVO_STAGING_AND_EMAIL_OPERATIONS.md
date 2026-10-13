@@ -26,7 +26,7 @@ Only transactional account/order/hiring mail is implemented. **Brevo marketing l
 1. Create/use an **isolated staging** Supabase environment; prepare the prior backend PR migrations and `20261013_brevo_email_outbox.sql`. Backup and review schema before any migration.
 2. Register and verify the desired sender/domain inside Brevo. Configure authenticated SPF, DKIM and DMARC; use a staging-compatible sender and a restricted Brevo API key.
 3. Set backend staging `FRONTEND_URL` to the **matching staging frontend domain**, NOT the pinned production domain. Set `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME`, `EMAIL_ENCRYPTION_KEY`, `BREVO_WEBHOOK_TOKEN` via the service secret manager. Do not paste them into GitHub, client code or chats.
-4. Set `BREVO_ENABLED=true`, keep `BREVO_WORKER_ENABLED=false` until migrations, tests and recipient allowlists are checked. On staging, use only controlled test recipient emails.
+4. Set `BREVO_ENABLED=true` and `BREVO_SEND_SCOPE=allowlist` with exact controlled inboxes listed in `BREVO_ALLOWED_RECIPIENTS`. Keep `BREVO_WORKER_ENABLED=false` until migrations, tests and those recipients are confirmed. Only a separately approved production rollout may set `BREVO_SEND_SCOPE=all`. On staging, use only controlled test recipient emails.
 5. In Brevo transactional webhook settings, add `https://<staging-backend>/api/email/webhook` with bearer-token authorization, and subscribe to delivered, deferred, hard bounce, soft bounce, blocked, invalid email and error events. Require HTTPS and test a wrong token is rejected.
 6. Enable `BREVO_WORKER_ENABLED=true` **only** after staging verified. Poll interval is 30 seconds with at most three jobs per claim. The current in-process worker stops when the free hosting process sleeps. For an enterprise launch deploy a dedicated always-on background worker (no multiple uncoordinated scheduler instances), queue alarms and staff on-call/incident playbook.
 7. Open **Site HQ → Email Delivery**, check queue counts and make controlled test applications/invites/orders.
@@ -56,6 +56,6 @@ Only transactional account/order/hiring mail is implemented. **Brevo marketing l
 ## Rollout notes
 
 - With `BREVO_ENABLED=false`, the system queues **nothing**, sends **nothing**, and staff invitations still return a private shareable link to the restaurant owner.
-- With `BREVO_ENABLED=true` and worker disabled, application events queue but do not send until enabled.
+- With `BREVO_ENABLED=true` and worker disabled, application events queue but do not send until enabled. By default, any queued recipient not in `BREVO_ALLOWED_RECIPIENTS` is marked failed rather than receiving email.
 - If staging is asleep, the in-process worker won't deliver until the process resumes. A dedicated always-on worker is required for strong time-based SLAs.
 - Do not advertise guaranteed delivery merely because Brevo accepted an email API request.
