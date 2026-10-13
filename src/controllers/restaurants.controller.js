@@ -1,18 +1,18 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import { restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
-import { createSubaccount, listBanks, resolveBankAccount } from '../utils/paystack.js';
+import { createSubaccount, listBanks, resolveBankAccount, getPaystackMode } from '../utils/paystack.js';
 
 const PUBLIC_FIELDS = 'id, name, description, cuisine_type, address, lat, lng, logo_url, cover_image_url, is_open, rating_avg, rating_count, created_at';
 const MANAGEMENT_FIELDS = `${PUBLIC_FIELDS}, approval_status`;
-const PRIVATE_MANAGEMENT_FIELDS = `${MANAGEMENT_FIELDS}, bank_name, bank_account_name, bank_account_number, paystack_subaccount_code`;
+const PRIVATE_MANAGEMENT_FIELDS = `${MANAGEMENT_FIELDS}, bank_name, bank_account_name, bank_account_number, paystack_subaccount_code, payout_mode`;
 
 function safeRestaurant(data) {
   if (!data) return data;
-  const { bank_name, bank_account_number, bank_account_name, paystack_subaccount_code, owner_id, ...safe } = data;
+  const { bank_name, bank_account_number, bank_account_name, paystack_subaccount_code, payout_mode, owner_id, ...safe } = data;
   return {
     ...safe,
     payout: {
-      ready: Boolean(paystack_subaccount_code),
+      ready: Boolean(paystack_subaccount_code && payout_mode === getPaystackMode()),
       bank_name: bank_name || null,
       account_name: bank_account_name || null,
       account_last4: bank_account_number ? bank_account_number.slice(-4) : null,
@@ -111,7 +111,7 @@ export async function getPayoutBanks(req, res, next) {
       .map((bank) => ({ code: String(bank.code), name: String(bank.name) }))
       .sort((a, b) => a.name.localeCompare(b.name));
     res.set('Cache-Control', 'private, max-age=3600');
-    res.json({ banks, mode: process.env.PAYSTACK_SECRET_KEY?.startsWith('sk_test_') ? 'test' : 'live' });
+    res.json({ banks, mode: getPaystackMode() });
   } catch (err) {
     if (err.response || err.code === 'ECONNABORTED') {
       return res.status(502).json({ error: 'Could not load banks from the payment provider. Please try again.' });
@@ -128,6 +128,8 @@ export async function submitBankDetails(req, res, next) {
         error: 'A payout account is already connected. Contact support to change it securely.',
       });
     }
+    const mode = getPaystackMode();
+    if (!mode) return res.status(503).json({ error: 'Paystack payment mode is not configured correctly.' });
     const { bank_code, account_number } = req.body;
     const directory = await listBanks();
     const selectedBank = directory.data?.find((bank) =>
@@ -158,6 +160,7 @@ export async function submitBankDetails(req, res, next) {
       bank_account_number: account_number.slice(-4),
       bank_account_name: accountName,
       paystack_subaccount_code: result.data.subaccount_code,
+      payout_mode: mode,
     }).eq('id', req.restaurant.id).is('paystack_subaccount_code', null)
       .select(PRIVATE_MANAGEMENT_FIELDS).maybeSingle();
     if (error) throw error;
