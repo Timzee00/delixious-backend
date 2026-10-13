@@ -1,6 +1,8 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import { initiateTransfer } from '../utils/paystack.js';
 import { deliveryCode, verifyDeliveryCode } from '../utils/deliveryProof.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 const AGENT_TRANSITIONS = {
   assigned: ['picked_up'],
@@ -176,6 +178,16 @@ export async function assignAgent(req, res, next) {
         type: 'order_update',
       },
     ]);
+    try {
+      const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
+      if (customer?.user?.email) await queueTransactionalEmail({
+        eventType:'delivery_assigned',to:customer.user.email,
+        variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+        dedupeKey:`rider-assigned:${order.id}`,
+      });
+    } catch (mailError) {
+      logger.warn('Rider-assigned email enqueue failed', { orderId:order.id, error:mailError.message });
+    }
     res.json({ message: 'Delivery agent assigned.', delivery_tracking: data });
   } catch (err) {
     next(err);
@@ -259,6 +271,16 @@ export async function claimDelivery(req, res, next) {
         type: 'order_update',
       },
     ]);
+    try {
+      const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
+      if (customer?.user?.email) await queueTransactionalEmail({
+        eventType:'delivery_assigned',to:customer.user.email,
+        variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+        dedupeKey:`rider-assigned:${order.id}`,
+      });
+    } catch (mailError) {
+      logger.warn('Rider-claimed email enqueue failed', { orderId:order.id, error:mailError.message });
+    }
     res.json({ message: 'Delivery claimed.', delivery_tracking: data });
   } catch (err) {
     next(err);
