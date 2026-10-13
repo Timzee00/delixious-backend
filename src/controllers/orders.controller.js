@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { supabaseAdmin } from '../config/supabase.js';
-import { restaurantAcceptingBySchedule } from '../utils/restaurantHours.js';
+import { getRestaurantAvailability } from '../utils/restaurantHours.js';
 import { initializeTransaction, getPaystackMode } from '../utils/paystack.js';
 
 const DELIVERY_FEE = 500;
@@ -67,13 +67,17 @@ export async function checkout(req, res, next) {
 
       const { data: hours, error: hoursError } = await supabaseAdmin
         .from('restaurant_operating_settings')
-        .select('schedule_enabled, weekly_hours')
+        .select('schedule_enabled, weekly_hours, paused_until, prep_time_minutes')
         .eq('restaurant_id', restaurant.id).maybeSingle();
       if (hoursError) throw hoursError;
-      if (hours?.schedule_enabled && !restaurantAcceptingBySchedule(hours.weekly_hours)) {
+      const availability = getRestaurantAvailability(restaurant, hours);
+      if (!availability.accepting_orders) {
+        const temporarilyPaused = availability.availability_reason === 'temporarily_paused';
         return res.status(409).json({
-          code: 'RESTAURANT_OUTSIDE_HOURS',
-          error: `${restaurant.name} is currently outside its scheduled business hours. Your cart is saved.`,
+          code: temporarilyPaused ? 'RESTAURANT_TEMPORARILY_PAUSED' : 'RESTAURANT_OUTSIDE_HOURS',
+          error: temporarilyPaused
+            ? `${restaurant.name} has temporarily paused new orders. Your cart is saved.`
+            : `${restaurant.name} is outside its scheduled business hours. Your cart is saved.`,
         });
       }
 
