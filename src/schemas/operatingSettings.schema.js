@@ -14,6 +14,12 @@ const day = z.object({
 
 export const operatingSettingsSchema = z.object({
   schedule_enabled: z.boolean(),
+  prep_time_minutes: z.number().int().min(10).max(180),
+  paused_until: z.string().datetime({ offset: true }).nullable(),
   weekly_hours: z.array(day).length(7).refine((days) => new Set(days.map((d) => d.weekday)).size === 7,
     'Include every weekday exactly once.'),
+}).superRefine((value, ctx) => {
+  if (value.paused_until && new Date(value.paused_until).getTime() > Date.now() + 90 * 86400000) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['paused_until'], message: 'Temporary pause cannot exceed 90 days.' });
+  }
 }).strict();
