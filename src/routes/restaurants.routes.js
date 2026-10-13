@@ -1,6 +1,7 @@
 import { Router } from 'express';
-import { submitBankDetails } from '../controllers/restaurants.controller.js';
-import { bankDetailsSchema } from '../schemas/payout.schema.js';
+import rateLimit from 'express-rate-limit';
+import { submitBankDetails, getPayoutBanks } from '../controllers/restaurants.controller.js';
+import { restaurantBankDetailsSchema } from '../schemas/payout.schema.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { requireRestaurantOwnership } from '../middleware/ownership.js';
 import { validate } from '../middleware/validate.js';
@@ -23,10 +24,14 @@ import { listOrdersQuerySchema } from '../schemas/orders.schema.js';
 import { listReviewsQuerySchema } from '../schemas/reviews.schema.js';
 
 const router = Router();
+const payoutLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 6, standardHeaders: true, legacyHeaders: false,
+  message: { error: 'Too many payout setup attempts. Please try again later.' },
+});
 
 // ---------- Public ----------
 router.get('/', validate({ query: listRestaurantsQuerySchema }), listRestaurants);
 router.get('/mine', requireAuth, requireRole('restaurant_owner', 'admin'), getMyRestaurants);
+router.get('/banks', requireAuth, requireRole('restaurant_owner', 'admin'), getPayoutBanks);
 router.get('/:id', getRestaurant);
 router.get('/:id/menu', getRestaurantMenu);
 router.get('/:id/reviews', validate({ query: listReviewsQuerySchema }), getRestaurantReviews);
@@ -35,7 +40,7 @@ router.get('/:id/reviews', validate({ query: listReviewsQuerySchema }), getResta
 router.post('/', requireAuth, requireRole('restaurant_owner', 'admin'), validate({ body: createRestaurantSchema }), createRestaurant);
 router.put('/:id', requireAuth, requireRestaurantOwnership, validate({ body: updateRestaurantSchema }), updateRestaurant);
 router.patch('/:id/toggle-open', requireAuth, requireRestaurantOwnership, toggleOpen);
-router.post('/:id/bank-details', requireAuth, requireRestaurantOwnership, validate({ body: bankDetailsSchema }), submitBankDetails);
+router.post('/:id/bank-details', requireAuth, requireRestaurantOwnership, payoutLimiter, validate({ body: restaurantBankDetailsSchema }), submitBankDetails);
 router.delete('/:id', requireAuth, requireRestaurantOwnership, deleteRestaurant);
 router.get('/:id/menu-management', requireAuth, requireRestaurantOwnership, getRestaurantMenuManagement);
 router.post('/:id/menu', requireAuth, requireRestaurantOwnership, validate({ body: createMenuItemSchema }), createMenuItem);
