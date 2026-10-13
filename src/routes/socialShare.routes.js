@@ -63,6 +63,23 @@ router.get('/restaurants/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/careers/:id', async (req, res, next) => {
+  try {
+    const { data, error } = await supabaseAdmin.from('restaurants')
+      .select('id,name,address,cover_image_url,logo_url')
+      .eq('id', req.params.id).eq('approval_status', 'approved').maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).send('Restaurant not found');
+    sendCard(res, {
+      title: `Careers at ${data.name}`,
+      description: `Explore open jobs and apply to join ${data.name}. ${data.address || ''}`.trim(),
+      image: data.cover_image_url || data.logo_url,
+      sharePath: `/share/careers/${encodeURIComponent(data.id)}`,
+      destination: `/restaurants/${encodeURIComponent(data.id)}/careers`,
+    });
+  } catch (err) { next(err); }
+});
+
 router.get('/jobs/:id', async (req, res, next) => {
   try {
     const { data, error } = await supabaseAdmin.from('restaurant_jobs')
