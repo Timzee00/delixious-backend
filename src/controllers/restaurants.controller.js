@@ -111,7 +111,7 @@ export async function getPayoutBanks(req, res, next) {
       .map((bank) => ({ code: String(bank.code), name: String(bank.name) }))
       .sort((a, b) => a.name.localeCompare(b.name));
     res.set('Cache-Control', 'private, max-age=3600');
-    res.json({ banks });
+    res.json({ banks, mode: process.env.PAYSTACK_SECRET_KEY?.startsWith('sk_test_') ? 'test' : 'live' });
   } catch (err) {
     if (err.response || err.code === 'ECONNABORTED') {
       return res.status(502).json({ error: 'Could not load banks from the payment provider. Please try again.' });
