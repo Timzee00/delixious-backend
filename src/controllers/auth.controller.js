@@ -221,3 +221,22 @@ export async function updateProfile(req, res, next) {
     next(err);
   }
 }
+
+export async function changePassword(req, res, next) {
+  try {
+    const { current_password, new_password } = req.body;
+    const { data: verified, error: verifyError } = await supabaseAnon.auth.signInWithPassword({
+      email: req.user.email,
+      password: current_password,
+    });
+    if (verifyError || verified.user?.id !== req.user.id) {
+      return res.status(401).json({ error: 'Current password is incorrect.' });
+    }
+    const { error } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, {
+      password: new_password,
+    });
+    if (error) return res.status(400).json({ error: 'Password could not be updated. Please try again.' });
+    clearAuthCookies(res);
+    res.json({ message: 'Password updated. Please sign in again.' });
+  } catch (err) { next(err); }
+}

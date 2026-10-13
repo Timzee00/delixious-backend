@@ -8,10 +8,11 @@ import {
   getMe,
   updateProfile,
   submitRiderBankDetails,
+  changePassword,
 } from '../controllers/auth.controller.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
-import { signupSchema, loginSchema, updateProfileSchema } from '../schemas/auth.schema.js';
+import { signupSchema, loginSchema, updateProfileSchema, changePasswordSchema } from '../schemas/auth.schema.js';
 import { bankDetailsSchema } from '../schemas/payout.schema.js';
 
 const router = Router();
@@ -30,6 +31,7 @@ router.post('/refresh', refresh);
 router.post('/logout', logout);
 router.get('/me', requireAuth, getMe);
 router.put('/profile', requireAuth, validate({ body: updateProfileSchema }), updateProfile);
+router.post('/change-password', authLimiter, requireAuth, validate({ body: changePasswordSchema }), changePassword);
 router.post(
   '/rider/bank-details',
   requireAuth,

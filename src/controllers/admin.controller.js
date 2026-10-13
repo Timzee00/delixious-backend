@@ -1,13 +1,31 @@
 import { supabaseAdmin } from '../config/supabase.js';
+import { getPaystackMode } from '../utils/paystack.js';
 
 export async function getStats(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin.from('admin_stats').select('*').single();
-    if (error) return res.status(400).json({ error: error.message });
-    res.json({ stats: data });
-  } catch (err) {
-    next(err);
-  }
+    // Independent indexed count queries; avoid an unmaintained admin_stats table.
+    const count = (table, apply = (q) => q) =>
+      apply(supabaseAdmin.from(table).select('*', { count: 'exact', head: true }));
+    const queries = [
+      count('restaurants'),
+      count('restaurants', (q) => q.eq('approval_status', 'pending')),
+      count('profiles', (q) => q.eq('role', 'delivery_agent')),
+      count('profiles', (q) => q.eq('role', 'delivery_agent').eq('rider_approval_status', 'pending')),
+      count('profiles', (q) => q.eq('role', 'customer')),
+      count('orders'),
+    ];
+    const results = await Promise.all(queries);
+    const failure = results.find((result) => result.error);
+    if (failure) return res.status(502).json({ error: 'Dashboard metrics are temporarily unavailable.' });
+    const [total_restaurants, pending_restaurants, total_riders, pending_riders, total_customers, total_orders] =
+      results.map(({ count: value }) => value ?? 0);
+    res.json({ stats: {
+      total_restaurants, pending_restaurants, total_riders,
+      pending_riders, total_customers, total_orders,
+      // Financial figures require a ledger-backed aggregate, not a naive sum of pending orders.
+      total_revenue: null, total_commission: null,
+    } });
+  } catch (err) { next(err); }
 }
 
 export async function listRestaurantsAdmin(req, res, next) {
@@ -18,7 +36,7 @@ export async function listRestaurantsAdmin(req, res, next) {
 
     let query = supabaseAdmin
       .from('restaurants')
-      .select('id, name, cuisine_type, address, approval_status, owner_id, created_at', { count: 'exact' })
+      .select('id, name, cuisine_type, address, approval_status, owner_id, created_at, paystack_subaccount_code, payout_mode', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
 
@@ -26,7 +44,9 @@ export async function listRestaurantsAdmin(req, res, next) {
 
     const { data, error, count } = await query;
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ restaurants: data, total: count, page, limit });
+    // Show payout readiness without exposing sensitive provider identifiers.
+    const restaurants = (data || []).map(({ paystack_subaccount_code, payout_mode, ...restaurant }) => ({ ...restaurant, payout_ready: Boolean(getPaystackMode() && paystack_subaccount_code && payout_mode === getPaystackMode()) }));
+    res.json({ restaurants, total: count, page, limit });
   } catch (err) {
     next(err);
   }
@@ -56,7 +76,7 @@ export async function listRidersAdmin(req, res, next) {
 
     const { data, error, count } = await supabaseAdmin
       .from('profiles')
-      .select('id, full_name, email, phone, rider_approval_status, rider_rating_avg, rider_rating_count, created_at', { count: 'exact' })
+      .select('id, full_name, phone, rider_approval_status, rider_rating_avg, rider_rating_count, created_at', { count: 'exact' })
       .eq('role', 'delivery_agent')
       .order('created_at', { ascending: false })
       .range(from, to);
@@ -93,7 +113,7 @@ export async function listUsersAdmin(req, res, next) {
 
     let query = supabaseAdmin
       .from('profiles')
-      .select('id, full_name, email, phone, role, is_suspended, created_at', { count: 'exact' })
+      .select('id, full_name, phone, role, is_suspended, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
 
@@ -109,6 +129,16 @@ export async function listUsersAdmin(req, res, next) {
 
 export async function setUserSuspension(req, res, next) {
   try {
+    if (req.params.id === req.user.id) {
+      return res.status(400).json({ error: 'You cannot suspend your own administrator account.' });
+    }
+    const { data: target, error: targetError } = await supabaseAdmin
+      .from('profiles').select('id, role').eq('id', req.params.id).maybeSingle();
+    if (targetError) throw targetError;
+    if (!target) return res.status(404).json({ error: 'Account not found.' });
+    if (target.role === 'admin') {
+      return res.status(403).json({ error: 'Administrator suspension requires a separate privileged review process.' });
+    }
     const { data, error } = await supabaseAdmin
       .from('profiles')
       .update({ is_suspended: req.body.suspended })
@@ -131,7 +161,7 @@ export async function listOrdersAdmin(req, res, next) {
 
     const { data, error, count } = await supabaseAdmin
       .from('orders')
-      .select('id, user_id, restaurant_id, status, total_amount, platform_commission, created_at', { count: 'exact' })
+      .select('id, user_id, restaurant_id, status, total_amount, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(from, to);
 
@@ -144,28 +174,27 @@ export async function listOrdersAdmin(req, res, next) {
 
 export async function sendBroadcast(req, res, next) {
   try {
+    // A synchronous request must not fan out to arbitrarily many accounts.
+    // High-volume campaigns require a durable queued worker with retries,
+    // rate limiting, opt-outs, and an auditable campaign state.
     const { title, message, role } = req.body;
-
-    let query = supabaseAdmin.from('profiles').select('id');
+    let query = supabaseAdmin.from('profiles').select('id', { count: 'exact' });
     if (role) query = query.eq('role', role);
-
-    const { data: users, error: usersError } = await query;
-    if (usersError) return res.status(400).json({ error: usersError.message });
-
-    const rows = users.map((u) => ({
-      user_id: u.id,
-      type: 'broadcast',
-      title,
-      body: message,
-    }));
-
-    if (rows.length) {
-      const { error: insertError } = await supabaseAdmin.from('notifications').insert(rows);
-      if (insertError) return res.status(400).json({ error: insertError.message });
+    const { data: users, count, error: usersError } = await query.range(0, 100);
+    if (usersError) throw usersError;
+    if ((count ?? 0) > 100) {
+      return res.status(409).json({
+        code: 'BROADCAST_QUEUE_REQUIRED',
+        error: 'This audience exceeds the safe synchronous broadcast limit. Use a queued campaign when available.',
+      });
     }
-
+    const rows = (users || []).map((u) => ({
+      user_id: u.id, type: 'broadcast', title, body: message,
+    }));
+    if (rows.length) {
+      const { error } = await supabaseAdmin.from('notifications').insert(rows);
+      if (error) throw error;
+    }
     res.status(201).json({ message: `Broadcast sent to ${rows.length} user(s).` });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 }

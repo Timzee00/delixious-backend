@@ -20,3 +20,10 @@ export const updateProfileSchema = z.object({
   phone: z.string().trim().optional(),
   avatar_url: z.string().url().optional().or(z.literal('')),
 });
+
+export const changePasswordSchema = z.object({
+  current_password: z.string().min(1, 'Enter your current password.'),
+  new_password: z.string().min(12, 'Use at least 12 characters.').max(128),
+}).refine((value) => value.current_password !== value.new_password, {
+  path: ['new_password'], message: 'Choose a password different from your current password.',
+});
