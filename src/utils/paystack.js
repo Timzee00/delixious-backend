@@ -47,6 +47,14 @@ export async function listBanks() {
   return data;
 }
 
+export async function resolveBankAccount({ bankCode, accountNumber }) {
+  const { data } = await client().get('/bank/resolve', {
+    params: { account_number: accountNumber, bank_code: bankCode },
+    timeout: 10000,
+  });
+  return data;
+}
+
 export async function createSubaccount({ businessName, bankCode, accountNumber, percentageCharge }) {
   const { data } = await client().post('/subaccount', {
     business_name: businessName,
