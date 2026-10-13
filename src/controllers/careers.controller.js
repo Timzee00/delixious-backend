@@ -68,7 +68,7 @@ export async function updateOwnerJob(req, res, next) {
 export async function submitJobApplication(req, res, next) {
   try {
     const { data: job, error: je } = await supabaseAdmin.from('restaurant_jobs')
-      .select('id,restaurant_id,published,restaurants!inner(approval_status)')
+      .select('id,restaurant_id,published,restaurants!inner(approval_status,owner_id)')
       .eq('id', req.params.jobId).eq('published', true).eq('restaurants.approval_status','approved')
       .maybeSingle();
     if (je) throw je;
@@ -79,7 +79,15 @@ export async function submitJobApplication(req, res, next) {
       applicant_phone: applicant_phone || null, cover_note, privacy_consent_at: new Date().toISOString(),
     });
     if (error) throw error;
-    // Do not return applicant identity or private application fields.
+    // Inform the owner, but keep applicant contact details inside the
+    // authenticated hiring workspace rather than a push notification.
+    await supabaseAdmin.from('notifications').insert({
+      user_id: job.restaurants.owner_id,
+      type: 'general',
+      title: 'New restaurant job application',
+      body: 'A new application was received for one of your published vacancies. Open Hiring to review it.',
+    });
+    // Application submission must not expose applicant identity in a response.
     res.status(201).json({ message: 'Application received. The restaurant will contact shortlisted candidates.' });
   } catch (err) { next(err); }
 }
