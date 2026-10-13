@@ -198,6 +198,22 @@ export async function changeStaffOrderStatus(req, res, next) {
       .select('id,status').maybeSingle();
     if (error) throw error;
     if (!data) return res.status(409).json({ error: 'This order was updated by someone else. Refresh the queue.' });
+    if (req.body.status === 'confirmed') {
+      try {
+        const { data: fullOrder } = await supabaseAdmin.from('orders')
+          .select('user_id').eq('id',order.id).single();
+        if (fullOrder?.user_id) {
+          const { data: recipient } = await supabaseAdmin.auth.admin.getUserById(fullOrder.user_id);
+          if (recipient?.user?.email) await queueTransactionalEmail({
+            eventType:'order_accepted',to:recipient.user.email,
+            variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+            dedupeKey:`order-accepted:${order.id}`,
+          });
+        }
+      } catch (mailError) {
+        logger.warn('Staff accepted-order email enqueue failed', { orderId:order.id, error:mailError.message });
+      }
+    }
     res.json({ order: data });
   } catch (err) { next(err); }
 }
