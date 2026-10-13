@@ -10,6 +10,7 @@ const EXEMPT_PATHS = new Set([
   '/api/auth/signup',
   '/api/auth/refresh',
   '/api/payments/webhook',
+  '/api/email/webhook',
 ]);
 
 export function generateCsrfToken() {
