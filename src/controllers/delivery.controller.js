@@ -66,16 +66,20 @@ async function payoutRider(order) {
       reference,
     });
 
-    await supabaseAdmin
-      .from('orders')
-      .update({
-        rider_payout_status: transfer.status ? 'paid' : 'failed',
-        rider_payout_reference: reference,
-      })
-      .eq('id', order.id)
-      .eq('rider_payout_status', 'processing');
+    // A successful HTTP response means Paystack accepted the transfer
+    // request, not that the rider has been credited. Only a signed
+    // transfer.success event confirms final settlement.
+    await supabaseAdmin.from('orders').update({
+      rider_payout_reference: reference,
+      rider_payout_status: transfer.status ? 'processing' : 'failed',
+    }).eq('id', order.id).eq('rider_payout_status', 'processing');
   } catch {
-    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id).eq('rider_payout_status', 'processing');
+    // A timeout may happen after Paystack accepts a request. Keep processing
+    // with its deterministic reference for provider reconciliation rather
+    // than declaring failure or initiating another transfer.
+    await supabaseAdmin.from('orders').update({
+      rider_payout_reference: reference,
+    }).eq('id', order.id).eq('rider_payout_status', 'processing');
   }
 }
 
