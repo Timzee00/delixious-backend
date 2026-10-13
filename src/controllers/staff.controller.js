@@ -1,5 +1,7 @@
 import crypto from 'crypto';
 import { supabaseAdmin } from '../config/supabase.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 const ROLE_LABELS = new Set(['manager', 'kitchen', 'counter']);
 const INVITE_DAYS = 7;
@@ -72,11 +74,24 @@ export async function createTeamInvite(req, res, next) {
     }).select('id,email,staff_role,expires_at').single();
     if (error) throw error;
     const base = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+    const inviteUrl = `${base}/staff/join?token=${encodeURIComponent(secret)}`;
+    let emailQueued = false;
+    try {
+      const delivery = await queueTransactionalEmail({
+        eventType:'staff_invitation',to:data.email,
+        variables:{ restaurant:restaurant.name,role:staff_role,inviteUrl },
+        dedupeKey:`staff-invite:${data.id}`,
+      });
+      emailQueued = delivery.queued;
+    } catch (mailError) {
+      logger.warn('Could not enqueue staff invitation email', { inviteId:data.id, error:mailError.message });
+    }
     res.set('Cache-Control', 'no-store');
     res.status(201).json({
-      invite: data,
-      invite_url: `${base}/staff/join?token=${encodeURIComponent(secret)}`,
-      warning: 'Share this single-use invitation privately with the intended staff member.',
+      invite: data, invite_url: inviteUrl, email_queued: emailQueued,
+      warning: emailQueued
+        ? 'Invitation queued for email delivery; you can also share the one-time link privately.'
+        : 'Automatic email unavailable; share this single-use link privately with the invited person.',
     });
   } catch (err) { next(err); }
 }
