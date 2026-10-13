@@ -83,14 +83,17 @@ async function reconcileRiderTransfer(eventType, transfer) {
   if (error) throw error;
   // Do not trust a transfer reference alone. Check current state, delivery,
   // and amount; reject any webhook that does not match our expected transfer.
-  if (!order || order.rider_payout_status !== 'processing'
+  const payable = eventType === 'transfer.reversed'
+    ? ['processing', 'paid'].includes(order?.rider_payout_status)
+    : order?.rider_payout_status === 'processing';
+  if (!order || !payable
     || order.status !== 'delivered' || order.payment_status !== 'paid') return;
   if (!Number.isFinite(Number(transfer.amount))
     || Math.round(Number(order.rider_payout_amount) * 100) !== Number(transfer.amount)) return;
   const payoutStatus = eventType === 'transfer.success' ? 'paid' : 'failed';
   const { error: writeError } = await supabaseAdmin.from('orders')
     .update({ rider_payout_status: payoutStatus })
-    .eq('id', order.id).eq('rider_payout_status', 'processing')
+    .eq('id', order.id).eq('rider_payout_status', order.rider_payout_status)
     .eq('rider_payout_reference', reference);
   if (writeError) throw writeError;
 }
