@@ -111,3 +111,14 @@ export async function removeFavoriteDish(req,res,next) {
     res.json({message:'Dish removed from your saved meals.'});
   }catch(err){next(err);}
 }
+
+export async function listFavoriteDishIds(req,res,next) {
+  try {
+    const {data,count,error}=await supabaseAdmin.from('menu_item_favorites')
+      .select('menu_item_id',{count:'exact'}).eq('user_id',req.user.id)
+      .order('created_at',{ascending:false}).limit(500);
+    if(error)throw error;
+    res.set('Cache-Control','private, no-store');
+    res.json({ids:(data||[]).map(row=>row.menu_item_id),has_more:(count||0)>500});
+  }catch(err){next(err);}
+}
