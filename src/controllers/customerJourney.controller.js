@@ -32,7 +32,7 @@ export async function getReturningCustomerHome(req,res,next) {
     const [recent,delivered] = await Promise.all([
       supabaseAdmin.from('orders')
         .select('id,restaurant_id,status,payment_status,total_amount,created_at,restaurants(id,name,logo_url)')
-        .eq('user_id',req.user.id).eq('payment_status','paid')
+        .eq('user_id',req.user.id).eq('payment_status','paid').eq('status','delivered')
         .order('created_at',{ascending:false}).limit(4),
       supabaseAdmin.from('orders')
         .select('id',{count:'exact',head:true})
