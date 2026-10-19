@@ -63,3 +63,51 @@ export async function removeFavoriteRestaurant(req, res, next) {
     next(err);
   }
 }
+
+export async function listFavoriteDishes(req,res,next) {
+  try {
+    const page = Number(req.query.page || 1), limit = Number(req.query.limit || 20);
+    const { data,count,error } = await supabaseAdmin.from('menu_item_favorites')
+      .select(`menu_item_id,created_at,menu_items!inner(
+        id,name,description,price,image_url,category,is_available,restaurant_id,
+        restaurants!inner(id,name,logo_url,cuisine_type,approval_status,is_open)
+      )`,{count:'exact'})
+      .eq('user_id',req.user.id)
+      .eq('menu_items.restaurants.approval_status','approved')
+      .order('created_at',{ascending:false})
+      .range((page-1)*limit,page*limit-1);
+    if(error) throw error;
+    res.set('Cache-Control','private, no-store');
+    res.json({
+      dishes:(data||[]).map((item)=>({ ...item.menu_items,
+        saved_at:item.created_at,
+      })),
+      ids:(data||[]).map(item=>item.menu_item_id),
+      page,limit,total:count||0,
+    });
+  }catch(err){next(err);}
+}
+
+export async function saveFavoriteDish(req,res,next) {
+  try {
+    const { data:item,error:readError } = await supabaseAdmin.from('menu_items')
+      .select('id,restaurant_id,restaurants!inner(approval_status)')
+      .eq('id',req.params.menuItemId)
+      .eq('restaurants.approval_status','approved').maybeSingle();
+    if(readError)throw readError;
+    if(!item)return res.status(404).json({error:'This dish is not available to save.'});
+    const {error}=await supabaseAdmin.from('menu_item_favorites')
+      .upsert({user_id:req.user.id,menu_item_id:item.id},
+        {onConflict:'user_id,menu_item_id',ignoreDuplicates:true});
+    if(error)throw error;
+    res.status(201).json({message:'Dish saved to your favourites.',id:item.id});
+  }catch(err){next(err);}
+}
+export async function removeFavoriteDish(req,res,next) {
+  try {
+    const {error}=await supabaseAdmin.from('menu_item_favorites')
+      .delete().eq('user_id',req.user.id).eq('menu_item_id',req.params.menuItemId);
+    if(error)throw error;
+    res.json({message:'Dish removed from your saved meals.'});
+  }catch(err){next(err);}
+}
