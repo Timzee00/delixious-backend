@@ -89,6 +89,20 @@ async function handleSuccessfulPayment(data) {
       .eq('id', claimedPayment.id)
       .eq('status', 'processing');
     if (successError) throw successError;
+    // This cleanup is deliberately not part of payment settlement. If the
+    // cart changed while the customer paid, or the cleanup is unavailable,
+    // payment stays successful and the customer's cart is untouched.
+    try {
+      const { error: cleanupError } = await supabaseAdmin.rpc('finalize_paid_checkout_cart',{
+        p_group_id:claimedPayment.checkout_group_id,
+      });
+      if (cleanupError) throw cleanupError;
+    } catch (cleanupError) {
+      logger.warn('Paid cart cleanup deferred', {
+        checkoutGroupId:claimedPayment.checkout_group_id,
+        error:cleanupError.message,
+      });
+    }
   } catch (err) {
     // Leave the payment retryable if order reconciliation failed.
     await supabaseAdmin.from('payments').update({ status: 'pending' }).eq('id', claimedPayment.id).eq('status', 'processing');
