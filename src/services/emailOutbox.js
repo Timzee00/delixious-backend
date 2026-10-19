@@ -32,11 +32,22 @@ export function decryptEmailPayload(encoded) {
 // Caller owns the business transaction. Email enqueue failures should be
 // logged by that caller and must NOT undo a successful payment or job invite.
 export async function queueTransactionalEmail({
-  eventType, to, name = '', variables = {}, dedupeKey,
+  eventType, to, name = '', variables = {}, dedupeKey, recipientUserId = null,
 }) {
   if (!emailConfigured()) return { queued: false, reason: 'email_not_configured' };
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(to)) || !dedupeKey) {
     throw new Error('Invalid recipient or missing idempotency key.');
+  }
+  // Customers can turn off non-security order update emails at any time.
+  // We still keep their in-app order history and payment state accurate.
+  if (recipientUserId && ['order_paid','order_accepted','delivery_assigned'].includes(eventType)) {
+    const { data: preferences, error: preferenceError } = await supabaseAdmin
+      .from('customer_email_preferences')
+      .select('order_updates_email').eq('user_id',recipientUserId).maybeSingle();
+    if (preferenceError) throw preferenceError;
+    if (preferences?.order_updates_email === false) {
+      return { queued:false, reason:'customer_opted_out' };
+    }
   }
   const { data, error } = await supabaseAdmin.from('email_outbox').upsert({
     event_type: eventType,
