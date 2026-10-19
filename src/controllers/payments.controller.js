@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import { supabaseAdmin } from '../config/supabase.js';
 import { verifyTransaction, listBanks } from '../utils/paystack.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 async function handleSuccessfulPayment(data) {
   const reference = data.reference;
@@ -29,7 +31,9 @@ async function handleSuccessfulPayment(data) {
   try {
     const { data: orders, error: ordersError } = await supabaseAdmin
       .from('orders')
-      .update({ payment_status: 'paid', status: 'confirmed' })
+      // Paying is not the same as kitchen acceptance. Keep status pending
+      // until the restaurant owner/counter explicitly confirms the order.
+      .update({ payment_status: 'paid' })
       .eq('checkout_group_id', claimedPayment.checkout_group_id)
       .eq('payment_status', 'pending')
       .select();
@@ -58,6 +62,25 @@ async function handleSuccessfulPayment(data) {
           type: 'order_update',
         });
       }
+      try {
+        const front = process.env.FRONTEND_URL || '';
+        const [{ data: buyer }, { data: owner }] = await Promise.all([
+          supabaseAdmin.auth.admin.getUserById(order.user_id),
+          restaurant ? supabaseAdmin.auth.admin.getUserById(restaurant.owner_id) : Promise.resolve({data:null}),
+        ]);
+        if (buyer?.user?.email) await queueTransactionalEmail({
+          eventType:'order_paid',to:buyer.user.email,recipientUserId:order.user_id,
+          variables:{ name:'customer',orderId:order.id,orderUrl:`${front}/orders/${order.id}` },
+          dedupeKey:`order-paid:${order.id}`,
+        });
+        if (owner?.user?.email) await queueTransactionalEmail({
+          eventType:'restaurant_order_received',to:owner.user.email,
+          variables:{ restaurant:restaurant.name,orderId:order.id,dashboardUrl:`${front}/dashboard` },
+          dedupeKey:`restaurant-order-paid:${order.id}`,
+        });
+      } catch (mailError) {
+        logger.warn('Paid order email enqueue failed', { orderId:order.id, error:mailError.message });
+      }
     }
 
     const { error: successError } = await supabaseAdmin
@@ -66,6 +89,20 @@ async function handleSuccessfulPayment(data) {
       .eq('id', claimedPayment.id)
       .eq('status', 'processing');
     if (successError) throw successError;
+    // This cleanup is deliberately not part of payment settlement. If the
+    // cart changed while the customer paid, or the cleanup is unavailable,
+    // payment stays successful and the customer's cart is untouched.
+    try {
+      const { error: cleanupError } = await supabaseAdmin.rpc('finalize_paid_checkout_cart',{
+        p_group_id:claimedPayment.checkout_group_id,
+      });
+      if (cleanupError) throw cleanupError;
+    } catch (cleanupError) {
+      logger.warn('Paid cart cleanup deferred', {
+        checkoutGroupId:claimedPayment.checkout_group_id,
+        error:cleanupError.message,
+      });
+    }
   } catch (err) {
     // Leave the payment retryable if order reconciliation failed.
     await supabaseAdmin.from('payments').update({ status: 'pending' }).eq('id', claimedPayment.id).eq('status', 'processing');
@@ -73,17 +110,48 @@ async function handleSuccessfulPayment(data) {
   }
 }
 
+async function reconcileRiderTransfer(eventType, transfer) {
+  const reference = transfer?.reference;
+  if (typeof reference !== 'string' || !/^rider_payout_[0-9a-f-]{36}$/i.test(reference)) return;
+  const orderId = reference.slice('rider_payout_'.length);
+  const { data: order, error } = await supabaseAdmin.from('orders')
+    .select('id,status,payment_status,rider_payout_amount,rider_payout_status,rider_payout_reference')
+    .eq('id', orderId).eq('rider_payout_reference', reference).maybeSingle();
+  if (error) throw error;
+  // Do not trust a transfer reference alone. Check current state, delivery,
+  // and amount; reject any webhook that does not match our expected transfer.
+  const payable = eventType === 'transfer.reversed'
+    ? ['processing', 'paid'].includes(order?.rider_payout_status)
+    : order?.rider_payout_status === 'processing';
+  if (!order || !payable
+    || order.status !== 'delivered' || order.payment_status !== 'paid') return;
+  if (!Number.isFinite(Number(transfer.amount))
+    || Math.round(Number(order.rider_payout_amount) * 100) !== Number(transfer.amount)) return;
+  const payoutStatus = eventType === 'transfer.success' ? 'paid' : 'failed';
+  const { error: writeError } = await supabaseAdmin.from('orders')
+    .update({ rider_payout_status: payoutStatus })
+    .eq('id', order.id).eq('rider_payout_status', order.rider_payout_status)
+    .eq('rider_payout_reference', reference);
+  if (writeError) throw writeError;
+}
+
 export async function paystackWebhook(req, res, next) {
   try {
+    const secret = process.env.PAYSTACK_SECRET_KEY;
     const signature = req.headers['x-paystack-signature'];
-    const expectedSignature = crypto
-      .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-      .update(req.rawBody || Buffer.from(JSON.stringify(req.body)))
-      .digest('hex');
-
-    if (!signature || signature !== expectedSignature) return res.status(401).json({ error: 'Invalid signature.' });
+    if (!secret || typeof signature !== 'string' || !/^[a-f0-9]{128}$/i.test(signature)) {
+      return res.status(401).json({ error: 'Invalid signature.' });
+    }
+    const expectedSignature = crypto.createHmac('sha512', secret)
+      .update(req.rawBody || Buffer.from(JSON.stringify(req.body))).digest();
+    if (!crypto.timingSafeEqual(Buffer.from(signature, 'hex'), expectedSignature)) {
+      return res.status(401).json({ error: 'Invalid signature.' });
+    }
 
     if (req.body.event === 'charge.success') await handleSuccessfulPayment(req.body.data);
+    if (req.body.event === 'transfer.success' || req.body.event === 'transfer.failed' || req.body.event === 'transfer.reversed') {
+      await reconcileRiderTransfer(req.body.event, req.body.data);
+    }
     res.sendStatus(200);
   } catch (err) {
     next(err);

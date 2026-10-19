@@ -1,5 +1,8 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import { initiateTransfer } from '../utils/paystack.js';
+import { deliveryCode, verifyDeliveryCode } from '../utils/deliveryProof.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 const AGENT_TRANSITIONS = {
   assigned: ['picked_up'],
@@ -8,7 +11,7 @@ const AGENT_TRANSITIONS = {
   delivered: [],
 };
 
-const CLAIMABLE_ORDER_STATUSES = ['confirmed', 'preparing', 'out_for_delivery'];
+const CLAIMABLE_ORDER_STATUSES = ['confirmed', 'preparing'];
 
 async function loadOrderWithRestaurant(orderId) {
   const { data, error } = await supabaseAdmin
@@ -56,6 +59,12 @@ async function payoutRider(order) {
   }
 
   const reference = `rider_payout_${order.id}`;
+  // Persist reference before the provider request. Fast Paystack webhooks may
+  // arrive before the initiating HTTP call returns.
+  const { error: referenceError } = await supabaseAdmin.from('orders')
+    .update({ rider_payout_reference: reference })
+    .eq('id', order.id).eq('rider_payout_status', 'processing');
+  if (referenceError) throw referenceError;
 
   try {
     const transfer = await initiateTransfer({
@@ -65,16 +74,20 @@ async function payoutRider(order) {
       reference,
     });
 
-    await supabaseAdmin
-      .from('orders')
-      .update({
-        rider_payout_status: transfer.status ? 'paid' : 'failed',
-        rider_payout_reference: reference,
-      })
-      .eq('id', order.id)
-      .eq('rider_payout_status', 'processing');
+    // A successful HTTP response means Paystack accepted the transfer
+    // request, not that the rider has been credited. Only a signed
+    // transfer.success event confirms final settlement.
+    await supabaseAdmin.from('orders').update({
+      rider_payout_reference: reference,
+      rider_payout_status: transfer.status ? 'processing' : 'failed',
+    }).eq('id', order.id).eq('rider_payout_status', 'processing');
   } catch {
-    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id).eq('rider_payout_status', 'processing');
+    // A timeout may happen after Paystack accepts a request. Keep processing
+    // with its deterministic reference for provider reconciliation rather
+    // than declaring failure or initiating another transfer.
+    await supabaseAdmin.from('orders').update({
+      rider_payout_reference: reference,
+    }).eq('id', order.id).eq('rider_payout_status', 'processing');
   }
 }
 
@@ -123,20 +136,58 @@ export async function assignAgent(req, res, next) {
     if (agentProfile.rider_approval_status !== 'approved') {
       return res.status(400).json({ error: 'This rider is not yet approved to take deliveries.' });
     }
+    const { count: busyCount, error: busyError } = await supabaseAdmin.from('delivery_tracking')
+      .select('order_id', { count: 'exact', head: true })
+      .eq('delivery_agent_id', delivery_agent_id)
+      .in('status', ['assigned','picked_up','en_route']);
+    if (busyError) throw busyError;
+    if (busyCount > 0) {
+      return res.status(409).json({ code: 'RIDER_BUSY', error: 'This rider is already completing another delivery. Choose an available rider.' });
+    }
 
+    // Conditional compare-and-set: do not overwrite a different rider's
+    // claim or a previously assigned delivery, even during a race.
     const { data, error } = await supabaseAdmin
       .from('delivery_tracking')
-      .upsert({ order_id: order.id, delivery_agent_id, status: 'assigned' }, { onConflict: 'order_id' })
-      .select()
-      .single();
+      .update({ delivery_agent_id, status: 'assigned', claimed_at: new Date().toISOString() })
+      .eq('order_id', order.id)
+      .eq('status', 'pending')
+      .is('delivery_agent_id', null)
+      .select('id, order_id, delivery_agent_id, status, claimed_at')
+      .maybeSingle();
+    if (error?.code === '23505') {
+      return res.status(409).json({ code: 'RIDER_BUSY', error: 'This rider was assigned another delivery just now.' });
+    }
     if (error) throw error;
-
-    await supabaseAdmin.from('notifications').insert({
-      user_id: order.user_id,
-      title: 'Delivery agent assigned',
-      body: `${agentProfile.full_name} will be delivering your order.`,
-      type: 'order_update',
+    if (!data) return res.status(409).json({
+      code: 'DELIVERY_ALREADY_ASSIGNED',
+      error: 'Another rider has already claimed or been assigned this delivery. Refresh to see its current status.',
     });
+
+    await supabaseAdmin.from('notifications').insert([
+      {
+        user_id: order.user_id,
+        title: 'Delivery agent assigned',
+        body: `${agentProfile.full_name} will be delivering your order.`,
+        type: 'order_update',
+      },
+      {
+        user_id: delivery_agent_id,
+        title: 'New delivery assigned',
+        body: `You were assigned a delivery from order #${order.id.slice(0, 8)}. Open My Deliveries for the pickup details.`,
+        type: 'order_update',
+      },
+    ]);
+    try {
+      const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
+      if (customer?.user?.email) await queueTransactionalEmail({
+        eventType:'delivery_assigned',to:customer.user.email,recipientUserId:order.user_id,
+        variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+        dedupeKey:`rider-assigned:${order.id}`,
+      });
+    } catch (mailError) {
+      logger.warn('Rider-assigned email enqueue failed', { orderId:order.id, error:mailError.message });
+    }
     res.json({ message: 'Delivery agent assigned.', delivery_tracking: data });
   } catch (err) {
     next(err);
@@ -145,21 +196,29 @@ export async function assignAgent(req, res, next) {
 
 export async function listAvailableDeliveries(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin
+    if (req.profile.rider_approval_status !== 'approved') {
+      return res.status(403).json({ error: 'Your rider account must be approved before seeing available deliveries.' });
+    }
+    const page = Number(req.query.page || 1);
+    const limit = Number(req.query.limit || 12);
+    // Only paid, restaurant-confirmed orders are dispatched. Use an inner
+    // join so PostgREST filters ineligible orders BEFORE page/range applies.
+    const from = (page - 1) * limit;
+    const { data, error, count } = await supabaseAdmin
       .from('delivery_tracking')
-      .select('*, orders(id, delivery_address, total_amount, status, payment_status, restaurants(name, address))')
+      .select('order_id, status, updated_at, orders!inner(id, status, payment_status, rider_payout_amount, restaurants(name, address))', { count: 'exact' })
       .eq('status', 'pending')
       .is('delivery_agent_id', null)
-      .order('updated_at', { ascending: true });
+      .eq('orders.payment_status', 'paid')
+      .in('orders.status', CLAIMABLE_ORDER_STATUSES)
+      .order('updated_at', { ascending: true })
+      .range(from, from + limit - 1);
     if (error) throw error;
-
-    const deliveries = (data || []).filter((d) =>
-      d.orders?.payment_status === 'paid' && CLAIMABLE_ORDER_STATUSES.includes(d.orders?.status)
-    );
-    res.json({ deliveries });
-  } catch (err) {
-    next(err);
-  }
+    // Protect customers' exact address and total spend until a rider is
+    // assigned. A claim reveals delivery details only to that rider.
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ deliveries: data || [], total: count ?? 0, page, limit });
+  } catch (err) { next(err); }
 }
 
 export async function claimDelivery(req, res, next) {
@@ -174,6 +233,16 @@ export async function claimDelivery(req, res, next) {
       return res.status(400).json({ error: 'This order is not eligible for delivery pickup yet.' });
     }
 
+    // Avoid a rider claiming a second job while an earlier one is in progress.
+    const { count: activeCount, error: activeError } = await supabaseAdmin.from('delivery_tracking')
+      .select('order_id', { count: 'exact', head: true })
+      .eq('delivery_agent_id', req.user.id)
+      .in('status', ['assigned', 'picked_up', 'en_route']);
+    if (activeError) throw activeError;
+    if (activeCount > 0) {
+      return res.status(409).json({ code: 'ACTIVE_DELIVERY_EXISTS', error: 'Complete your active delivery before claiming another.' });
+    }
+
     const { data, error } = await supabaseAdmin
       .from('delivery_tracking')
       .update({ delivery_agent_id: req.user.id, status: 'assigned', claimed_at: new Date().toISOString() })
@@ -182,15 +251,36 @@ export async function claimDelivery(req, res, next) {
       .is('delivery_agent_id', null)
       .select()
       .maybeSingle();
+    if (error?.code === '23505') {
+      return res.status(409).json({ code: 'ACTIVE_DELIVERY_EXISTS', error: 'You already have an active delivery. Finish it before claiming another.' });
+    }
     if (error) throw error;
     if (!data) return res.status(409).json({ error: 'This delivery has already been claimed by someone else.' });
 
-    await supabaseAdmin.from('notifications').insert({
-      user_id: order.user_id,
-      title: 'Delivery agent assigned',
-      body: `${req.profile.full_name} will be delivering your order.`,
-      type: 'order_update',
-    });
+    await supabaseAdmin.from('notifications').insert([
+      {
+        user_id: order.user_id,
+        title: 'Delivery agent assigned',
+        body: `${req.profile.full_name} will be delivering your order.`,
+        type: 'order_update',
+      },
+      {
+        user_id: order.restaurants.owner_id,
+        title: 'Rider claimed your order',
+        body: `${req.profile.full_name} has claimed delivery for order #${order.id.slice(0, 8)}.`,
+        type: 'order_update',
+      },
+    ]);
+    try {
+      const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
+      if (customer?.user?.email) await queueTransactionalEmail({
+        eventType:'delivery_assigned',to:customer.user.email,recipientUserId:order.user_id,
+        variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+        dedupeKey:`rider-assigned:${order.id}`,
+      });
+    } catch (mailError) {
+      logger.warn('Rider-claimed email enqueue failed', { orderId:order.id, error:mailError.message });
+    }
     res.json({ message: 'Delivery claimed.', delivery_tracking: data });
   } catch (err) {
     next(err);
@@ -213,6 +303,30 @@ export async function updateLocation(req, res, next) {
   }
 }
 
+export async function getDeliveryProofCode(req, res, next) {
+  try {
+    const { data: order, error } = await supabaseAdmin.from('orders')
+      .select('id,user_id,payment_status,status').eq('id', req.params.orderId).maybeSingle();
+    if (error) throw error;
+    if (!order || order.user_id !== req.user.id) {
+      return res.status(404).json({ error: 'Order not found.' });
+    }
+    if (order.payment_status !== 'paid' || ['cancelled','delivered'].includes(order.status)) {
+      return res.status(409).json({ error: 'Handoff code not available for this order.' });
+    }
+    const { data: tracking, error: trackingError } = await supabaseAdmin.from('delivery_tracking')
+      .select('status,delivery_agent_id').eq('order_id', order.id).maybeSingle();
+    if (trackingError) throw trackingError;
+    if (!tracking?.delivery_agent_id || !['assigned','picked_up','en_route'].includes(tracking.status)) {
+      return res.status(409).json({ error: 'Handoff code becomes available after a rider is assigned.' });
+    }
+    const code = deliveryCode(order.id, order.user_id);
+    if (!code) return res.status(503).json({ error: 'Delivery handoff verification is not configured yet.' });
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ code, instruction: 'Share this code only after the rider arrives with your order.' });
+  } catch (err) { next(err); }
+}
+
 export async function updateDeliveryStatus(req, res, next) {
   try {
     const { status } = req.body;
@@ -223,9 +337,43 @@ export async function updateDeliveryStatus(req, res, next) {
     }
     const allowedNext = AGENT_TRANSITIONS[tracking.status] || [];
     if (!allowedNext.includes(status)) return res.status(400).json({ error: `Cannot move delivery from "${tracking.status}" to "${status}".` });
+    if (status === 'delivered') {
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from('orders').select('id,user_id,payment_status').eq('id', req.params.orderId).single();
+      if (orderError) throw orderError;
+      if (order.payment_status !== 'paid') return res.status(409).json({ error: 'Payment has not been confirmed.' });
+      const expected = deliveryCode(order.id, order.user_id);
+      if (!expected) return res.status(503).json({ error: 'Delivery proof verification is not configured.' });
+      if ((tracking.proof_attempts || 0) >= 5) {
+        return res.status(423).json({ error: 'Too many incorrect codes. Contact Delixious support to verify delivery.' });
+      }
+      if (!verifyDeliveryCode(req.body.proof_code, expected)) {
+        const attempts = Number(tracking.proof_attempts || 0);
+        const { data: incremented, error: incrementError } = await supabaseAdmin.from('delivery_tracking')
+          .update({ proof_attempts: attempts + 1 })
+          .eq('order_id', req.params.orderId).eq('proof_attempts', attempts)
+          .eq('status', tracking.status).select('id').maybeSingle();
+        if (incrementError) throw incrementError;
+        return res.status(incremented ? 403 : 409).json({
+          error: incremented ? 'Incorrect six-digit delivery code. Ask the customer to confirm it.' : 'Delivery changed; refresh and try again.',
+        });
+      }
+    }
+    // Prevent pickup while the restaurant has not prepared the food.
+    if (status === 'picked_up') {
+      const { data: order, error: orderError } = await supabaseAdmin
+        .from('orders').select('status, payment_status').eq('id', req.params.orderId).single();
+      if (orderError) throw orderError;
+      if (order.payment_status !== 'paid' || order.status !== 'preparing') {
+        return res.status(409).json({ error: 'The restaurant must be preparing the paid order before pickup can be confirmed.' });
+      }
+    }
 
-    const { data: updated, error: updateError } = await supabaseAdmin.from('delivery_tracking').update({ status }).eq('order_id', req.params.orderId).eq('status', tracking.status).select().single();
+    const { data: updated, error: updateError } = await supabaseAdmin.from('delivery_tracking')
+      .update(status === 'delivered' ? { status, proof_verified_at: new Date().toISOString() } : { status })
+      .eq('order_id', req.params.orderId).eq('status', tracking.status).select().maybeSingle();
     if (updateError) throw updateError;
+    if (!updated) return res.status(409).json({ error: 'Delivery status was already updated. Refresh your active jobs.' });
 
     const orderStatusMap = { picked_up: 'out_for_delivery', en_route: 'out_for_delivery', delivered: 'delivered' };
     if (orderStatusMap[status]) {

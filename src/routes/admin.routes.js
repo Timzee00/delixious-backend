@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { getRetentionInsights } from '../controllers/retentionInsights.controller.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import {
@@ -27,6 +28,7 @@ const router = Router();
 router.use(requireAuth, requireRole('admin'));
 
 router.get('/stats', getStats);
+router.get('/retention', getRetentionInsights);
 
 router.get('/restaurants', validate({ query: listRestaurantsAdminQuerySchema }), listRestaurantsAdmin);
 router.patch('/restaurants/:id/approval', validate({ body: approvalStatusSchema }), setRestaurantApproval);

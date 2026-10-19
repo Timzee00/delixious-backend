@@ -1,6 +1,9 @@
 import { v4 as uuidv4 } from 'uuid';
 import { supabaseAdmin } from '../config/supabase.js';
-import { initializeTransaction } from '../utils/paystack.js';
+import { getRestaurantAvailability } from '../utils/restaurantHours.js';
+import { initializeTransaction, getPaystackMode } from '../utils/paystack.js';
+import { queueTransactionalEmail } from '../services/emailOutbox.js';
+import logger from '../utils/logger.js';
 
 const DELIVERY_FEE = 500;
 const COMMISSION_RATE = 0.10;
@@ -27,7 +30,6 @@ export async function checkout(req, res, next) {
 
     const checkoutGroupId = uuidv4();
     const createdOrders = [];
-    const cartsToClear = [];
     const splitSubaccounts = [];
     let grandTotalKobo = 0;
 
@@ -46,13 +48,38 @@ export async function checkout(req, res, next) {
 
       const { data: restaurant, error: restaurantError } = await supabaseAdmin
         .from('restaurants')
-        .select('id, name, is_open, approval_status, paystack_subaccount_code')
+        .select('id, name, is_open, approval_status, paystack_subaccount_code, payout_mode')
         .eq('id', cart.restaurant_id)
         .single();
       if (restaurantError || !restaurant) return res.status(404).json({ error: 'Restaurant not found.' });
       if (!restaurant.is_open) return res.status(400).json({ error: `${restaurant.name} is currently closed.` });
-      if (restaurant.approval_status !== 'approved' || !restaurant.paystack_subaccount_code) {
-        return res.status(400).json({ error: `${restaurant.name} is not yet approved to receive orders. Please remove it from your cart.` });
+      if (restaurant.approval_status !== 'approved') {
+        return res.status(409).json({ code: 'RESTAURANT_NOT_APPROVED', error: `${restaurant.name} is still awaiting marketplace approval. Please choose another restaurant for now.` });
+      }
+      if (!restaurant.paystack_subaccount_code) {
+        return res.status(409).json({ code: 'RESTAURANT_PAYOUT_SETUP_REQUIRED', error: `${restaurant.name} cannot accept online orders until its payout account is set up. Your cart has been preserved; please try another restaurant or check back later.` });
+      }
+      if (!getPaystackMode() || restaurant.payout_mode !== getPaystackMode()) {
+        return res.status(409).json({
+          code: 'RESTAURANT_PAYOUT_MODE_MISMATCH',
+          error: `${restaurant.name} needs to reconnect its payout account for the current payment environment. Your cart has been preserved.`,
+        });
+      }
+
+      const { data: hours, error: hoursError } = await supabaseAdmin
+        .from('restaurant_operating_settings')
+        .select('schedule_enabled, weekly_hours, paused_until, prep_time_minutes')
+        .eq('restaurant_id', restaurant.id).maybeSingle();
+      if (hoursError) throw hoursError;
+      const availability = getRestaurantAvailability(restaurant, hours);
+      if (!availability.accepting_orders) {
+        const temporarilyPaused = availability.availability_reason === 'temporarily_paused';
+        return res.status(409).json({
+          code: temporarilyPaused ? 'RESTAURANT_TEMPORARILY_PAUSED' : 'RESTAURANT_OUTSIDE_HOURS',
+          error: temporarilyPaused
+            ? `${restaurant.name} has temporarily paused new orders. Your cart is saved.`
+            : `${restaurant.name} is outside its scheduled business hours. Your cart is saved.`,
+        });
       }
 
       const subtotal = cartItems.reduce((sum, ci) => sum + Number(ci.menu_items.price) * ci.quantity, 0);
@@ -98,7 +125,6 @@ export async function checkout(req, res, next) {
       if (trackingError) throw trackingError;
 
       createdOrders.push(order);
-      cartsToClear.push(cart.id);
       splitSubaccounts.push({ subaccount: restaurant.paystack_subaccount_code, shareKobo: restaurantShareKobo });
       grandTotalKobo += Math.round(total_amount * 100);
     }
@@ -151,12 +177,10 @@ export async function checkout(req, res, next) {
       throw orderReferenceError;
     }
 
-    // Only clear carts after payment initialization and all local payment
-    // bookkeeping have succeeded. A failed checkout therefore leaves the cart intact.
-    for (const cartId of cartsToClear) {
-      const { error: cartDeleteError } = await supabaseAdmin.from('carts').delete().eq('id', cartId).eq('user_id', req.user.id);
-      if (cartDeleteError) throw cartDeleteError;
-    }
+    // Keep the cart until Paystack actually verifies successful payment.
+    // Abandoned/failed payment attempts must never erase a customer's meal.
+    // Post-payment cleanup is handled by the guarded finalize_paid_order_cart
+    // database function, which refuses to delete a cart modified in the meantime.
 
     res.status(201).json({
       message: 'Orders created. Redirect the customer to authorization_url to complete payment.',
@@ -230,6 +254,12 @@ export async function getOrder(req, res, next) {
 export async function updateOrderStatus(req, res, next) {
   try {
     const { status } = req.body;
+    if (status === 'out_for_delivery' || status === 'delivered') {
+      return res.status(409).json({
+        code: 'RIDER_CONTROLS_DELIVERY',
+        error: 'The assigned rider updates pickup, en-route and delivery completion. Restaurant staff should prepare the order and hand it to the rider.',
+      });
+    }
     const { data: order, error } = await supabaseAdmin.from('orders').select('*, restaurants(owner_id)').eq('id', req.params.id).single();
     if (error || !order) return res.status(404).json({ error: 'Order not found.' });
     const isRestaurantOwner = order.restaurants.owner_id === req.user.id;
@@ -243,6 +273,18 @@ export async function updateOrderStatus(req, res, next) {
     const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status }).eq('id', order.id).eq('status', order.status).select().single();
     if (updateError) throw updateError;
     await supabaseAdmin.from('notifications').insert({ user_id: order.user_id, title: 'Order update', body: `Your order is now "${status.replace(/_/g, ' ')}".`, type: 'order_update' });
+    if (status === 'confirmed') {
+      try {
+        const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
+        if (customer?.user?.email) await queueTransactionalEmail({
+          eventType:'order_accepted',to:customer.user.email,recipientUserId:order.user_id,
+          variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
+          dedupeKey:`order-accepted:${order.id}`,
+        });
+      } catch (mailError) {
+        logger.warn('Order acceptance email enqueue failed', { orderId:order.id, error:mailError.message });
+      }
+    }
     res.json({ message: 'Order status updated.', order: updated });
   } catch (err) {
     next(err);
@@ -254,9 +296,16 @@ export async function cancelOrder(req, res, next) {
     const { data: order, error } = await supabaseAdmin.from('orders').select('*').eq('id', req.params.id).single();
     if (error || !order) return res.status(404).json({ error: 'Order not found.' });
     if (order.user_id !== req.user.id) return res.status(403).json({ error: 'You can only cancel your own orders.' });
+    if (order.payment_status !== 'failed') {
+      return res.status(409).json({
+        code: 'PAYMENT_CANCELLATION_REVIEW_REQUIRED',
+        error: 'This order has a payment pending, completed, or already refunded. Contact Delixious support to request cancellation; financial adjustments require verification.',
+      });
+    }
     if (!['pending', 'confirmed'].includes(order.status)) return res.status(400).json({ error: `Order can no longer be cancelled (status: ${order.status}).` });
-    const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status: 'cancelled' }).eq('id', order.id).eq('status', order.status).select().single();
+    const { data: updated, error: updateError } = await supabaseAdmin.from('orders').update({ status: 'cancelled' }).eq('id', order.id).eq('status', order.status).eq('payment_status', 'failed').select().maybeSingle();
     if (updateError) throw updateError;
+    if (!updated) return res.status(409).json({ error: 'Payment or order status changed. Refresh and try again.' });
     res.json({ message: 'Order cancelled.', order: updated });
   } catch (err) {
     next(err);
