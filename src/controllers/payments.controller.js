@@ -69,7 +69,7 @@ async function handleSuccessfulPayment(data) {
           restaurant ? supabaseAdmin.auth.admin.getUserById(restaurant.owner_id) : Promise.resolve({data:null}),
         ]);
         if (buyer?.user?.email) await queueTransactionalEmail({
-          eventType:'order_paid',to:buyer.user.email,
+          eventType:'order_paid',to:buyer.user.email,recipientUserId:order.user_id,
           variables:{ name:'customer',orderId:order.id,orderUrl:`${front}/orders/${order.id}` },
           dedupeKey:`order-paid:${order.id}`,
         });
