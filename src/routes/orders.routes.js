@@ -20,8 +20,8 @@ router.post('/checkout', requireAuth, validate({ body: checkoutSchema }), checko
 router.get('/', requireAuth, validate({ query: listOrdersQuerySchema }), listMyOrders);
 router.get('/returning-home', requireAuth, getReturningCustomerHome);
 router.get('/group/:checkoutGroupId', requireAuth, getOrderGroup);
-router.get('/:id/reorder-preview', requireAuth, previewReorder);
-router.post('/:id/reorder', requireAuth, validate({ body: z.object({ confirm_replace: z.literal(true) }).strict() }), applyReorder);
+router.get('/:id/reorder-preview', requireAuth, validate({ params: z.object({ id: z.string().uuid() }) }), previewReorder);
+router.post('/:id/reorder', requireAuth, validate({ params: z.object({ id: z.string().uuid() }), body: z.object({ confirm_replace: z.literal(true) }).strict() }), applyReorder);
 router.get('/:id', requireAuth, getOrder);
 router.patch('/:id/status', requireAuth, validate({ body: updateOrderStatusSchema }), updateOrderStatus);
 router.patch('/:id/cancel', requireAuth, cancelOrder);
