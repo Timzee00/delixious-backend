@@ -20,7 +20,7 @@ BEGIN
   -- Serialize two simultaneous restores by the same user.
   PERFORM 1 FROM public.profiles WHERE id=p_user_id FOR UPDATE;
   SELECT * INTO past FROM public.orders
-    WHERE id=p_order_id AND user_id=p_user_id AND payment_status='paid';
+    WHERE id=p_order_id AND user_id=p_user_id AND payment_status='paid' AND status='delivered';
   IF NOT FOUND THEN RAISE EXCEPTION 'REORDER_ORDER_NOT_FOUND'; END IF;
 
   SELECT * INTO chosen FROM public.restaurants
