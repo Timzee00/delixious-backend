@@ -181,7 +181,7 @@ export async function assignAgent(req, res, next) {
     try {
       const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
       if (customer?.user?.email) await queueTransactionalEmail({
-        eventType:'delivery_assigned',to:customer.user.email,
+        eventType:'delivery_assigned',to:customer.user.email,recipientUserId:order.user_id,
         variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
         dedupeKey:`rider-assigned:${order.id}`,
       });
@@ -274,7 +274,7 @@ export async function claimDelivery(req, res, next) {
     try {
       const { data: customer } = await supabaseAdmin.auth.admin.getUserById(order.user_id);
       if (customer?.user?.email) await queueTransactionalEmail({
-        eventType:'delivery_assigned',to:customer.user.email,
+        eventType:'delivery_assigned',to:customer.user.email,recipientUserId:order.user_id,
         variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
         dedupeKey:`rider-assigned:${order.id}`,
       });
