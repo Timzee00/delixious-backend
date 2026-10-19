@@ -30,7 +30,6 @@ export async function checkout(req, res, next) {
 
     const checkoutGroupId = uuidv4();
     const createdOrders = [];
-    const cartsToClear = [];
     const splitSubaccounts = [];
     let grandTotalKobo = 0;
 
@@ -126,7 +125,6 @@ export async function checkout(req, res, next) {
       if (trackingError) throw trackingError;
 
       createdOrders.push(order);
-      cartsToClear.push(cart.id);
       splitSubaccounts.push({ subaccount: restaurant.paystack_subaccount_code, shareKobo: restaurantShareKobo });
       grandTotalKobo += Math.round(total_amount * 100);
     }
@@ -179,12 +177,10 @@ export async function checkout(req, res, next) {
       throw orderReferenceError;
     }
 
-    // Only clear carts after payment initialization and all local payment
-    // bookkeeping have succeeded. A failed checkout therefore leaves the cart intact.
-    for (const cartId of cartsToClear) {
-      const { error: cartDeleteError } = await supabaseAdmin.from('carts').delete().eq('id', cartId).eq('user_id', req.user.id);
-      if (cartDeleteError) throw cartDeleteError;
-    }
+    // Keep the cart until Paystack actually verifies successful payment.
+    // Abandoned/failed payment attempts must never erase a customer's meal.
+    // Post-payment cleanup is handled by the guarded finalize_paid_order_cart
+    // database function, which refuses to delete a cart modified in the meantime.
 
     res.status(201).json({
       message: 'Orders created. Redirect the customer to authorization_url to complete payment.',
