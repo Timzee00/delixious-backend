@@ -1,0 +1,10 @@
+import { Router } from 'express';
+import { requireAuth } from '../middleware/auth.js';
+import { validate } from '../middleware/validate.js';
+import { emailPreferencesSchema } from '../schemas/emailPreferences.schema.js';
+import { getMyEmailPreferences,setMyEmailPreferences } from '../controllers/emailPreferences.controller.js';
+const router=Router();
+router.use(requireAuth);
+router.get('/',getMyEmailPreferences);
+router.put('/',validate({body:emailPreferencesSchema}),setMyEmailPreferences);
+export default router;
