@@ -3,7 +3,7 @@ import { supabaseAdmin } from '../config/supabase.js';
 async function loadOrderForReorder(userId, orderId) {
   const { data, error } = await supabaseAdmin.from('orders')
     .select('id,restaurant_id,payment_status,status,restaurants(id,name,approval_status,is_open),order_items(id,menu_item_id,name_snapshot,price_snapshot,quantity)')
-    .eq('id',orderId).eq('user_id',userId).eq('payment_status','paid').maybeSingle();
+    .eq('id',orderId).eq('user_id',userId).eq('payment_status','paid').eq('status','delivered').maybeSingle();
   if (error) throw error;
   return data;
 }
@@ -13,7 +13,7 @@ async function loadOrderForReorder(userId, orderId) {
 export async function previewReorder(req,res,next) {
   try {
     const order = await loadOrderForReorder(req.user.id,req.params.id);
-    if (!order) return res.status(404).json({ error:'Paid order not found.' });
+    if (!order) return res.status(404).json({ error:'Completed paid order not found.' });
     const menuIds = (order.order_items || []).map((i) => i.menu_item_id).filter(Boolean);
     const uniqueIds = [...new Set(menuIds)];
     let current = [];
