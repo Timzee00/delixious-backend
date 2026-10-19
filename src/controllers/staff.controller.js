@@ -205,7 +205,7 @@ export async function changeStaffOrderStatus(req, res, next) {
         if (fullOrder?.user_id) {
           const { data: recipient } = await supabaseAdmin.auth.admin.getUserById(fullOrder.user_id);
           if (recipient?.user?.email) await queueTransactionalEmail({
-            eventType:'order_accepted',to:recipient.user.email,
+            eventType:'order_accepted',to:recipient.user.email,recipientUserId:fullOrder.user_id,
             variables:{ orderId:order.id,orderUrl:`${process.env.FRONTEND_URL}/orders/${order.id}` },
             dedupeKey:`order-accepted:${order.id}`,
           });
