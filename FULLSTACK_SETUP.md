@@ -17,7 +17,7 @@ This one repository contains the Delixious food-delivery platform, including **a
 2. `npm ci --prefix frontend` (frontend dependencies)
 3. Copy `.env.example` to `.env` and `frontend/.env.example` to `frontend/.env`. Supply your own environment variable values; NEVER commit live keys.
 4. In terminal A: `npm run dev` (Express API).
-5. In terminal B: `npm run dev:frontend` (Vite frontend, port 5173). Local API base defaults to `/api`; configure Vite proxy or `VITE_API_URL=http://localhost:<backend-port>/api` if needed. Note that separate origins may need cookie/CORS setup; single-origin production avoids this.
+5. In terminal B: `npm run dev:frontend` (Vite frontend, port 5173). Local API base defaults to `/api`. Vite proxies `/api` to Express on port 5000, so browser auth cookies remain same-origin. Run the API with `PORT=5000` or update the proxy target in `frontend/vite.config.js`.
 6. Test: `npm test`, `npm run test:frontend`.
 7. Build frontend: `npm run build` and then `npm start`.
 
