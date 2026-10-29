@@ -6,7 +6,8 @@ services:
     region: frankfurt
     branch: main
     autoDeployTrigger: commit
-    buildCommand: npm ci && rm -rf frontend && git clone --depth 1 https://github.com/Timzee00/delixious-frontend.git frontend && npm ci --prefix frontend && npm run build --prefix frontend
+    # npm postinstall builds the checked-in frontend; there is no git clone.
+    buildCommand: npm ci
     startCommand: npm start
     healthCheckPath: /health
     envVars:

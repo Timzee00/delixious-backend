@@ -3,31 +3,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-if (process.env.NODE_ENV !== 'production') {
-  process.exit(0);
-}
+// The deployed Render service historically runs npm install without a separate build.
+// Preserve that behavior, but use the committed monorepo frontend instead of cloning.
+if (process.env.NODE_ENV !== 'production') process.exit(0);
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const frontend = path.join(root, 'frontend');
-
-function run(command, args, cwd = root) {
-  console.log(`[delixious] Running: ${command} ${args.join(' ')}`);
-  execFileSync(command, args, { cwd, stdio: 'inherit', env: process.env });
+if (!fs.existsSync(path.join(frontend, 'package.json'))) {
+  console.error('[delixious] Monorepo frontend/package.json is missing. Check the checkout.');
+  process.exit(1);
 }
-
+function run(args) {
+  console.log('[delixious] npm ' + args.join(' '));
+  execFileSync('npm', args, { cwd: root, stdio: 'inherit', env: process.env });
+}
 try {
-  // The existing Render service uses "npm install" + "npm start" rather than
-  // the repository render.yaml build command. Prepare the frontend during
-  // production startup so the service can still serve the unified app.
-  if (fs.existsSync(frontend)) {
-    fs.rmSync(frontend, { recursive: true, force: true });
-  }
-
-  run('git', ['clone', '--depth', '1', 'https://github.com/Timzee00/delixious-frontend.git', 'frontend']);
-  run('npm', ['ci', '--include=dev', '--prefix', 'frontend']);
-  run('npm', ['run', 'build', '--prefix', 'frontend']);
+  run(['ci', '--include=dev', '--prefix', 'frontend']);
+  run(['run', 'build', '--prefix', 'frontend']);
 } catch (error) {
-  console.error('[delixious] Frontend preparation failed.');
-  console.error(error);
+  console.error('[delixious] Building the bundled frontend failed:', error.message);
   process.exit(1);
 }
