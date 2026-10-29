@@ -1,14 +1,18 @@
 {
   "name": "delixious-backend",
   "version": "1.0.0",
-  "description": "Delixious - multi-restaurant food ordering platform API",
+  "description": "Delixious full-stack food-ordering platform (React/Vite frontend + Express API)",
   "main": "src/server.js",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "vitest run",
-    "postinstall": "node scripts/prepare-frontend.mjs"
+    "postinstall": "node scripts/prepare-frontend.mjs",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build": "npm run build:frontend",
+    "build:frontend": "npm ci --include=dev --prefix frontend && npm run build --prefix frontend",
+    "test:frontend": "npm test --prefix frontend"
   },
   "engines": {
     "node": ">=18.0.0"

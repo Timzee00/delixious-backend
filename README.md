@@ -1,3 +1,9 @@
+# Delixious — Full-stack repository
+
+The **React/Vite frontend and Express backend are now in one repository**. See [FULLSTACK_SETUP.md](FULLSTACK_SETUP.md) for setup, testing, and deployment instructions.
+
+---
+
 # Delixious Backend
 
 Multi-restaurant food ordering platform API. Node.js/Express + Supabase

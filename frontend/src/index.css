@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :focus-visible {
+    outline: 2px solid theme('colors.pepper.DEFAULT');
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .ticket {
+    position: relative;
+    background: theme('colors.paper');
+    border: 1px solid theme('colors.hairline');
+    border-radius: 0.75rem;
+    overflow: visible;
+  }
+  .ticket::before,
+  .ticket::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 14px;
+    height: 14px;
+    background: theme('colors.sand');
+    border: 1px solid theme('colors.hairline');
+    border-radius: 9999px;
+  }
+  .ticket::before { left: -8px; }
+  .ticket::after { right: -8px; }
+  .ticket-divider { border-top: 1px dashed theme('colors.hairline'); }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+}
