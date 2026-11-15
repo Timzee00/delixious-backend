@@ -51,8 +51,11 @@ export async function checkout(req, res, next) {
         .single();
       if (restaurantError || !restaurant) return res.status(404).json({ error: 'Restaurant not found.' });
       if (!restaurant.is_open) return res.status(400).json({ error: `${restaurant.name} is currently closed.` });
-      if (restaurant.approval_status !== 'approved' || !restaurant.paystack_subaccount_code) {
-        return res.status(400).json({ error: `${restaurant.name} is not yet approved to receive orders. Please remove it from your cart.` });
+      if (restaurant.approval_status !== 'approved') {
+        return res.status(400).json({ error: `${restaurant.name} has not been approved to receive orders yet. Please choose an approved business.`, code: 'RESTAURANT_NOT_APPROVED' });
+      }
+      if (!restaurant.paystack_subaccount_code) {
+        return res.status(400).json({ error: `${restaurant.name} is approved, but its payout account has not been connected yet. The business must finish payout setup before it can accept paid orders.`, code: 'RESTAURANT_PAYOUT_NOT_CONNECTED' });
       }
 
       const subtotal = cartItems.reduce((sum, ci) => sum + Number(ci.menu_items.price) * ci.quantity, 0);
@@ -70,7 +73,7 @@ export async function checkout(req, res, next) {
           delivery_fee: DELIVERY_FEE,
           total_amount,
           platform_commission,
-          rider_payout_amount: Math.round(DELIVERY_FEE * 0.9 * 100) / 100,
+          rider_payout_amount: DELIVERY_FEE,
           delivery_address,
           delivery_lat,
           delivery_lng,
