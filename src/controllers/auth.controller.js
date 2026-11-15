@@ -38,6 +38,86 @@ export async function signup(req, res, next) {
   }
 }
 
+export async function requestPasswordReset(req, res, next) {
+  try {
+    const { email } = req.body;
+    const redirectTo = `${process.env.FRONTEND_URL}/reset-password`;
+    const { error } = await supabaseAnon.auth.resetPasswordForEmail(email, { redirectTo });
+    if (error) {
+      // Do not reveal whether an account exists or is eligible for recovery.
+      logger.warn('Password recovery email could not be queued', { message: error.message });
+    }
+    res.json({ message: 'If an account exists for that email, a password reset link has been sent.' });
+  } catch (err) {
+    // Keep the response identical to avoid account enumeration through provider errors.
+    logger.error('Password recovery request failed', { error: err.message });
+    res.json({ message: 'If an account exists for that email, a password reset link has been sent.' });
+  }
+}
+
+export async function establishPasswordRecoverySession(req, res, next) {
+  try {
+    let session = null;
+    let recoveryError = null;
+    if (req.body.token_hash) {
+      const { data, error } = await supabaseAnon.auth.verifyOtp({
+        token_hash: req.body.token_hash,
+        type: 'recovery',
+      });
+      session = data?.session || null;
+      recoveryError = error;
+    } else {
+      const { data, error } = await supabaseAnon.auth.setSession({
+        access_token: req.body.access_token,
+        refresh_token: req.body.refresh_token,
+      });
+      session = data?.session || null;
+      recoveryError = error;
+    }
+
+    if (recoveryError || !session?.user) {
+      return res.status(400).json({ error: 'This password reset link is invalid or has expired. Request a new link.' });
+    }
+
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from('profiles')
+      .select('*')
+      .eq('id', session.user.id)
+      .single();
+
+    if (profileError || !profile) {
+      clearAuthCookies(res);
+      return res.status(400).json({ error: 'Your account profile could not be loaded. Contact support.' });
+    }
+    if (profile.is_suspended) {
+      clearAuthCookies(res);
+      return res.status(403).json({ error: 'This account has been suspended. Please contact support.' });
+    }
+
+    const csrfToken = setAuthCookies(res, session);
+    res.json({
+      message: 'Recovery link verified. Choose a new password.',
+      user: { id: session.user.id, email: session.user.email },
+      profile,
+      csrfToken,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export async function updatePassword(req, res, next) {
+  try {
+    const { data, error } = await supabaseAdmin.auth.admin.updateUserById(req.user.id, {
+      password: req.body.password,
+    });
+    if (error) return res.status(400).json({ error: error.message });
+    res.json({ message: 'Password updated successfully.', user: { id: data.user.id, email: data.user.email } });
+  } catch (err) {
+    next(err);
+  }
+}
+
 export async function submitRiderBankDetails(req, res, next) {
   try {
     const { bank_name, bank_code, account_number } = req.body;
