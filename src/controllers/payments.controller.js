@@ -73,6 +73,41 @@ async function handleSuccessfulPayment(data) {
   }
 }
 
+async function reconcileRiderTransfer(data, event) {
+  const reference = data?.reference;
+  if (!reference) return;
+
+  let payoutStatus = null;
+  if (event === 'transfer.success') payoutStatus = 'paid';
+  if (event === 'transfer.failed' || event === 'transfer.reversed') payoutStatus = 'failed';
+  if (!payoutStatus) return;
+
+  const { data: updated, error } = await supabaseAdmin
+    .from('orders')
+    .update({ rider_payout_status: payoutStatus, rider_payout_reference: reference })
+    .eq('rider_payout_reference', reference)
+    .eq('rider_payout_status', 'processing')
+    .select('id, rider_payout_amount');
+
+  if (error) throw error;
+  for (const order of updated || []) {
+    const { data: tracking } = await supabaseAdmin
+      .from('delivery_tracking')
+      .select('delivery_agent_id')
+      .eq('order_id', order.id)
+      .maybeSingle();
+    if (!tracking?.delivery_agent_id) continue;
+    await supabaseAdmin.from('notifications').insert({
+      user_id: tracking.delivery_agent_id,
+      title: payoutStatus === 'paid' ? 'Delivery payout completed' : 'Delivery payout needs attention',
+      body: payoutStatus === 'paid'
+        ? `Your delivery payout of ₦${Number(order.rider_payout_amount || 0).toLocaleString('en-NG')} has been confirmed.`
+        : 'Paystack could not complete the delivery payout. Delixious will review the transfer status.',
+      type: 'payment',
+    });
+  }
+}
+
 export async function paystackWebhook(req, res, next) {
   try {
     const signature = req.headers['x-paystack-signature'];
@@ -84,6 +119,9 @@ export async function paystackWebhook(req, res, next) {
     if (!signature || signature !== expectedSignature) return res.status(401).json({ error: 'Invalid signature.' });
 
     if (req.body.event === 'charge.success') await handleSuccessfulPayment(req.body.data);
+    if (['transfer.success', 'transfer.failed', 'transfer.reversed'].includes(req.body.event)) {
+      await reconcileRiderTransfer(req.body.data, req.body.event);
+    }
     res.sendStatus(200);
   } catch (err) {
     next(err);
