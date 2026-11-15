@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '../config/supabase.js';
 import { initiateTransfer } from '../utils/paystack.js';
+import logger from '../utils/logger.js';
 
 const AGENT_TRANSITIONS = {
   assigned: ['picked_up'],
@@ -21,60 +22,92 @@ async function loadOrderWithRestaurant(orderId) {
 }
 
 async function payoutRider(order) {
-  if (order.rider_payout_status === 'paid' || !order.rider_payout_amount) return;
+  const amount = Number(order.rider_payout_amount || 0);
+  if (order.rider_payout_status === 'paid' || amount <= 0) return;
 
-  const { data: locked } = await supabaseAdmin
+  const reference = order.rider_payout_reference || `rider_payout_${order.id}`;
+  const { data: locked, error: lockError } = await supabaseAdmin
     .from('orders')
-    .update({ rider_payout_status: 'processing' })
+    .update({ rider_payout_status: 'processing', rider_payout_reference: reference })
     .eq('id', order.id)
     .eq('rider_payout_status', 'pending')
     .select('id')
     .maybeSingle();
 
+  if (lockError) throw lockError;
   if (!locked) return;
 
-  const { data: tracking } = await supabaseAdmin
+  const { data: tracking, error: trackingError } = await supabaseAdmin
     .from('delivery_tracking')
     .select('delivery_agent_id')
     .eq('order_id', order.id)
     .single();
 
-  if (!tracking?.delivery_agent_id) {
-    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id).eq('rider_payout_status', 'processing');
+  if (trackingError || !tracking?.delivery_agent_id) {
+    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' })
+      .eq('id', order.id).eq('rider_payout_status', 'processing');
+    logger.error('Rider payout blocked: no assigned rider', { orderId: order.id });
     return;
   }
 
-  const { data: rider } = await supabaseAdmin
+  const { data: rider, error: riderError } = await supabaseAdmin
     .from('profiles')
     .select('rider_transfer_recipient_code')
     .eq('id', tracking.delivery_agent_id)
     .single();
 
-  if (!rider?.rider_transfer_recipient_code) {
-    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id).eq('rider_payout_status', 'processing');
+  if (riderError || !rider?.rider_transfer_recipient_code) {
+    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' })
+      .eq('id', order.id).eq('rider_payout_status', 'processing');
+    logger.error('Rider payout blocked: rider payout account is not connected', {
+      orderId: order.id, riderId: tracking.delivery_agent_id,
+    });
     return;
   }
 
-  const reference = `rider_payout_${order.id}`;
-
   try {
     const transfer = await initiateTransfer({
-      amountKobo: Math.round(order.rider_payout_amount * 100),
+      amountKobo: Math.round(amount * 100),
       recipientCode: rider.rider_transfer_recipient_code,
       reason: `Delivery payout for order #${order.id.slice(0, 8)}`,
       reference,
     });
 
-    await supabaseAdmin
-      .from('orders')
-      .update({
-        rider_payout_status: transfer.status ? 'paid' : 'failed',
-        rider_payout_reference: reference,
-      })
-      .eq('id', order.id)
-      .eq('rider_payout_status', 'processing');
-  } catch {
-    await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' }).eq('id', order.id).eq('rider_payout_status', 'processing');
+    if (!transfer.status) {
+      await supabaseAdmin.from('orders').update({ rider_payout_status: 'failed' })
+        .eq('id', order.id).eq('rider_payout_status', 'processing');
+      logger.error('Paystack rejected rider transfer', { orderId: order.id, message: transfer.message });
+      return;
+    }
+
+    const providerStatus = String(transfer.data?.status || 'pending').toLowerCase();
+    const payoutStatus = providerStatus === 'success'
+      ? 'paid'
+      : ['failed', 'reversed', 'rejected'].includes(providerStatus)
+        ? 'failed'
+        : 'processing';
+
+    const { error: updateError } = await supabaseAdmin.from('orders')
+      .update({ rider_payout_status: payoutStatus, rider_payout_reference: reference })
+      .eq('id', order.id).eq('rider_payout_status', 'processing');
+    if (updateError) throw updateError;
+
+    if (payoutStatus === 'paid') {
+      await supabaseAdmin.from('notifications').insert({
+        user_id: tracking.delivery_agent_id,
+        title: 'Delivery payout completed',
+        body: `Your delivery payout of ₦${amount.toLocaleString('en-NG')} for order #${order.id.slice(0, 8)} has been confirmed.`,
+        type: 'payment',
+      });
+    }
+    // A queued/pending provider transfer remains processing until Paystack's
+    // transfer.success/failed/reversed webhook confirms the final outcome.
+  } catch (err) {
+    // Keep the deterministic reference in processing for webhook/reconciliation.
+    // Do not mark a timed-out network request as paid or automatically retry it.
+    logger.error('Rider payout transfer outcome is unknown; awaiting reconciliation', {
+      orderId: order.id, reference, error: err.message,
+    });
   }
 }
 
@@ -114,7 +147,7 @@ export async function assignAgent(req, res, next) {
 
     const { data: agentProfile, error: agentError } = await supabaseAdmin
       .from('profiles')
-      .select('id, role, full_name, rider_approval_status')
+      .select('id, role, full_name, rider_approval_status, rider_transfer_recipient_code')
       .eq('id', delivery_agent_id)
       .single();
     if (agentError || !agentProfile || agentProfile.role !== 'delivery_agent') {
@@ -122,6 +155,9 @@ export async function assignAgent(req, res, next) {
     }
     if (agentProfile.rider_approval_status !== 'approved') {
       return res.status(400).json({ error: 'This rider is not yet approved to take deliveries.' });
+    }
+    if (!agentProfile.rider_transfer_recipient_code) {
+      return res.status(400).json({ error: 'This rider must connect a verified payout account before being assigned.' , code: 'RIDER_PAYOUT_SETUP_REQUIRED' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -145,18 +181,32 @@ export async function assignAgent(req, res, next) {
 
 export async function listAvailableDeliveries(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin
+    if (!req.profile.rider_transfer_recipient_code) {
+      return res.status(409).json({
+        error: 'Connect your verified payout account before browsing and claiming paid deliveries.',
+        code: 'RIDER_PAYOUT_SETUP_REQUIRED',
+      });
+    }
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+    const from = (page - 1) * limit;
+
+    const { data, error, count } = await supabaseAdmin
       .from('delivery_tracking')
-      .select('*, orders(id, delivery_address, total_amount, status, payment_status, restaurants(name, address))')
+      .select(
+        'order_id, delivery_agent_id, status, updated_at, orders!inner(id, delivery_address, total_amount, delivery_fee, rider_payout_amount, rider_payout_status, status, payment_status, restaurants(name, address))',
+        { count: 'estimated' }
+      )
       .eq('status', 'pending')
       .is('delivery_agent_id', null)
-      .order('updated_at', { ascending: true });
-    if (error) throw error;
+      .eq('orders.payment_status', 'paid')
+      .in('orders.status', CLAIMABLE_ORDER_STATUSES)
+      .order('updated_at', { ascending: true })
+      .order('order_id', { ascending: true })
+      .range(from, from + limit - 1);
 
-    const deliveries = (data || []).filter((d) =>
-      d.orders?.payment_status === 'paid' && CLAIMABLE_ORDER_STATUSES.includes(d.orders?.status)
-    );
-    res.json({ deliveries });
+    if (error) throw error;
+    res.json({ deliveries: data || [], total: count || 0, page, limit });
   } catch (err) {
     next(err);
   }
@@ -166,6 +216,9 @@ export async function claimDelivery(req, res, next) {
   try {
     if (req.profile.rider_approval_status !== 'approved') {
       return res.status(403).json({ error: 'Your rider account is not yet approved to take deliveries.' });
+    }
+    if (!req.profile.rider_transfer_recipient_code) {
+      return res.status(403).json({ error: 'Connect your verified payout account before claiming deliveries.', code: 'RIDER_PAYOUT_SETUP_REQUIRED' });
     }
 
     const order = await loadOrderWithRestaurant(req.params.orderId);
@@ -273,14 +326,19 @@ export async function getDeliveryTracking(req, res, next) {
 
 export async function listMyDeliveries(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+    const from = (page - 1) * limit;
+    const { data, error, count } = await supabaseAdmin
       .from('delivery_tracking')
-      .select('*, orders(id, delivery_address, total_amount, status, rider_payout_amount, rider_payout_status, payment_status, restaurants(name, address))')
+      .select('order_id, delivery_agent_id, status, updated_at, claimed_at, orders(id, delivery_address, total_amount, delivery_fee, status, rider_payout_amount, rider_payout_status, rider_payout_reference, payment_status, restaurants(name, address))', { count: 'estimated' })
       .eq('delivery_agent_id', req.user.id)
       .neq('status', 'delivered')
-      .order('updated_at', { ascending: false });
+      .order('updated_at', { ascending: false })
+      .order('order_id', { ascending: true })
+      .range(from, from + limit - 1);
     if (error) throw error;
-    res.json({ deliveries: data });
+    res.json({ deliveries: data || [], total: count || 0, page, limit });
   } catch (err) {
     next(err);
   }
@@ -288,15 +346,19 @@ export async function listMyDeliveries(req, res, next) {
 
 export async function listMyDeliveryHistory(req, res, next) {
   try {
-    const { data, error } = await supabaseAdmin
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 50);
+    const from = (page - 1) * limit;
+    const { data, error, count } = await supabaseAdmin
       .from('delivery_tracking')
-      .select('*, orders(id, delivery_address, total_amount, rider_payout_amount, rider_payout_status, payment_status, restaurants(name))')
+      .select('order_id, delivery_agent_id, status, updated_at, claimed_at, orders(id, delivery_address, total_amount, delivery_fee, rider_payout_amount, rider_payout_status, rider_payout_reference, payment_status, restaurants(name))', { count: 'estimated' })
       .eq('delivery_agent_id', req.user.id)
       .eq('status', 'delivered')
       .order('updated_at', { ascending: false })
-      .limit(50);
+      .order('order_id', { ascending: true })
+      .range(from, from + limit - 1);
     if (error) throw error;
-    res.json({ deliveries: data });
+    res.json({ deliveries: data || [], total: count || 0, page, limit });
   } catch (err) {
     next(err);
   }
