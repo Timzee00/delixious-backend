@@ -69,6 +69,8 @@ create table if not exists public.restaurants (
   lng double precision,
   logo_url text,
   cover_image_url text,
+  business_types text[] not null default ARRAY['restaurant']::text[],
+  slug text not null,
   is_open boolean not null default true,
   rating_avg numeric(2,1) not null default 0,
   rating_count integer not null default 0,
@@ -94,6 +96,11 @@ create table if not exists public.menu_items (
   image_url text,
   category text,
   is_available boolean not null default true,
+  search_vector tsvector generated always as (
+    setweight(to_tsvector('simple', coalesce(name, '')), 'A')
+    || setweight(to_tsvector('simple', coalesce(description, '')), 'B')
+    || setweight(to_tsvector('simple', coalesce(category, '')), 'C')
+  ) stored,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -103,6 +110,11 @@ create trigger trg_menu_items_updated_at before update on public.menu_items
   for each row execute function public.set_updated_at();
 
 create index if not exists idx_menu_items_restaurant on public.menu_items(restaurant_id);
+create unique index if not exists idx_restaurants_slug_unique on public.restaurants(slug);
+create index if not exists idx_restaurants_business_types_gin on public.restaurants using gin(business_types) where approval_status = 'approved';
+create index if not exists idx_menu_items_storefront_feed on public.menu_items(restaurant_id, created_at desc, id asc) where is_available = true;
+create index if not exists idx_menu_items_storefront_category on public.menu_items(restaurant_id, category, created_at desc, id asc) where is_available = true;
+create index if not exists idx_menu_items_search_vector on public.menu_items using gin(search_vector);
 
 -- ============================================================
 -- CARTS + CART ITEMS  (one active cart per user per restaurant)
