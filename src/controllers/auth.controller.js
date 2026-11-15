@@ -1,7 +1,23 @@
 import { supabaseAdmin, supabaseAnon } from '../config/supabase.js';
-import { createSubaccount, createTransferRecipient } from '../utils/paystack.js';
+import { createTransferRecipient } from '../utils/paystack.js';
 import { setAuthCookies, clearAuthCookies } from '../utils/authCookies.js';
 import logger from '../utils/logger.js';
+
+function publicProfile(profile) {
+  if (!profile) return profile;
+  const {
+    rider_transfer_recipient_code,
+    rider_paystack_subaccount_code,
+    rider_bank_account_number,
+    rider_bank_account_name,
+    ...safe
+  } = profile;
+  return {
+    ...safe,
+    rider_payout_account_connected: Boolean(rider_transfer_recipient_code),
+    rider_bank_account_last4: rider_bank_account_number ? String(rider_bank_account_number).slice(-4) : null,
+  };
+}
 
 export async function signup(req, res, next) {
   try {
@@ -98,7 +114,7 @@ export async function establishPasswordRecoverySession(req, res, next) {
     res.json({
       message: 'Recovery link verified. Choose a new password.',
       user: { id: session.user.id, email: session.user.email },
-      profile,
+      profile: publicProfile(profile),
       csrfToken,
     });
   } catch (err) {
@@ -121,26 +137,19 @@ export async function updatePassword(req, res, next) {
 export async function submitRiderBankDetails(req, res, next) {
   try {
     const { bank_name, bank_code, account_number } = req.body;
-
-    const subaccountResponse = await createSubaccount({
-      businessName: req.profile.full_name,
-      bankCode: bank_code,
-      accountNumber: account_number,
-      percentageCharge: 10,
-    });
-
-    if (!subaccountResponse.status) {
-      return res.status(502).json({ error: 'Could not verify bank details with Paystack. Please check the details and try again.' });
+    if (req.profile.rider_transfer_recipient_code) {
+      return res.status(409).json({ error: 'A payout recipient is already connected. Contact support to change it safely.' });
     }
 
+    // Rider payouts use a Paystack transfer recipient, not a restaurant subaccount.
     const recipientResponse = await createTransferRecipient({
       name: req.profile.full_name,
       bankCode: bank_code,
       accountNumber: account_number,
     });
 
-    if (!recipientResponse.status) {
-      return res.status(502).json({ error: 'Could not set up payouts with Paystack. Please try again.' });
+    if (!recipientResponse.status || !recipientResponse.data?.recipient_code) {
+      return res.status(502).json({ error: 'Could not set up rider payouts with Paystack. Please check the bank details and try again.' });
     }
 
     const { data, error } = await supabaseAdmin
@@ -148,20 +157,17 @@ export async function submitRiderBankDetails(req, res, next) {
       .update({
         rider_bank_name: bank_name,
         rider_bank_account_number: account_number,
-        rider_bank_account_name: subaccountResponse.data.account_name,
-        rider_paystack_subaccount_code: subaccountResponse.data.subaccount_code,
+        rider_bank_account_name: recipientResponse.data.details?.account_name || req.profile.full_name,
         rider_transfer_recipient_code: recipientResponse.data.recipient_code,
       })
       .eq('id', req.user.id)
-      .select()
+      .select('*')
       .single();
 
     if (error) return res.status(400).json({ error: error.message });
-    res.json({ message: 'Payout account connected.', profile: data });
+    res.json({ message: 'Verified rider payout account connected.', profile: publicProfile(data) });
   } catch (err) {
-    if (err.response?.data?.message) {
-      return res.status(400).json({ error: err.response.data.message });
-    }
+    if (err.response?.data?.message) return res.status(400).json({ error: err.response.data.message });
     next(err);
   }
 }
@@ -269,7 +275,7 @@ export async function logout(req, res, next) {
 export async function getMe(req, res) {
   res.json({
     user: { id: req.user.id, email: req.user.email },
-    profile: req.profile,
+    profile: publicProfile(req.profile),
     csrfToken: req.cookies?.csrf_token,
   });
 }
@@ -296,7 +302,7 @@ export async function updateProfile(req, res, next) {
       return res.status(400).json({ error: error.message });
     }
 
-    res.json({ message: 'Profile updated.', profile: data });
+    res.json({ message: 'Profile updated.', profile: publicProfile(data) });
   } catch (err) {
     next(err);
   }
