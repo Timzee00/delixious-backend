@@ -16,3 +16,9 @@ export const updateDeliveryStatusSchema = z.object({
 export const searchAgentsQuerySchema = z.object({
   phone: z.string().trim().min(3, "Provide at least 3 digits of the agent's phone number."),
 });
+
+
+export const deliveryListQuerySchema = z.object({
+  page: z.coerce.number().int().positive().optional().default(1),
+  limit: z.coerce.number().int().positive().max(50).optional().default(20),
+});
