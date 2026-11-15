@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const menuFeedQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
   cuisine: z.string().trim().max(50).optional(),
+  open_only: z.enum(['true', 'false']).optional(),
   category: z.string().trim().max(50).optional(),
   restaurant_ids: z.string().trim().optional(),
   min_price: z.coerce.number().finite().min(0).optional(),
