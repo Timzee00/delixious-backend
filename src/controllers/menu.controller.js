@@ -8,7 +8,7 @@ const FEED_FIELDS = \`
 export async function listMenuFeed(req, res, next) {
   try {
     const {
-      q, cuisine, category, restaurant_ids,
+      q, cuisine, category, restaurant_ids, open_only,
       min_price, max_price, min_rating, sort = 'newest',
       page, limit,
     } = req.query;
@@ -23,6 +23,7 @@ export async function listMenuFeed(req, res, next) {
 
     if (q) query = query.or(\`name.ilike.%\${q}%,description.ilike.%\${q}%\`);
     if (cuisine) query = query.eq('restaurants.cuisine_type', cuisine);
+    if (open_only === 'true') query = query.eq('restaurants.is_open', true);
     if (category) query = query.eq('category', category);
     if (restaurant_ids) {
       const ids = restaurant_ids.split(',').map((id) => id.trim()).filter(Boolean);
