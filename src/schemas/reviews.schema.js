@@ -12,6 +12,9 @@ export const updateReviewSchema = z.object({
 });
 
 export const listReviewsQuerySchema = z.object({
-  page: z.coerce.number().int().positive().optional().default(1),
+  // Cursor mode is used for restaurant-facing review lists. The optional page
+  // parameter remains available for the older customer review-history route.
+  page: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().positive().max(50).optional().default(20),
+  cursor: z.string().trim().min(1).max(512).optional(),
 });
